@@ -10045,6 +10045,47 @@ body.dark-mode .input-error { background: #451a1a !important; }
   }
 
   /**
+   * Compute dose-response heterogeneity Q test.
+   * Tests H0: all studies follow the same dose-response relationship.
+   * Uses Cochran-type Q on study-level residuals from the pooled DR model.
+   * @param {Array} points - [{dose, effect, se, studyId}]
+   * @param {Object} model - fitted model with .residuals array
+   * @returns {Object} {Q_DR, df, pValue, I2_DR} or null
+   */
+  function computeDRHeterogeneity(points, model) {
+    if (!points || points.length < 3 || !model) return null;
+    var residuals = model.residuals;
+    if (!residuals || residuals.length !== points.length) return null;
+
+    var Q = 0;
+    for (var i = 0; i < points.length; i++) {
+      var sei = points[i].se;
+      if (!sei || !isFinite(sei) || sei <= 0) continue;
+      var w = 1 / (sei * sei);
+      Q += w * residuals[i] * residuals[i];
+    }
+
+    // df = n_points - n_parameters
+    var nParams = 1;
+    var mt = model.model || '';
+    if (mt === 'Linear') nParams = 1;
+    else if (mt === 'Quadratic') nParams = 2;
+    else if (mt === 'Emax') nParams = 2;
+    else if (mt.startsWith('RCS-3')) nParams = 2;
+    else if (mt.startsWith('RCS-4')) nParams = 3;
+    else if (mt.startsWith('FP1')) nParams = 1;
+    else if (mt.startsWith('FP2')) nParams = 2;
+
+    var df = points.length - nParams;
+    if (df <= 0) return null;
+
+    var pValue = 1 - chi2CDF(Q, df);
+    var I2_DR = df > 0 && Q > df ? ((Q - df) / Q) * 100 : 0;
+
+    return { Q_DR: Q, df: df, pValue: pValue, I2_DR: I2_DR };
+  }
+
+  /**
    * Compare dose-response models and select the best by AIC.
    */
   function compareDoseResponseModels(points) {
@@ -10357,7 +10398,14 @@ body.dark-mode .input-error { background: #451a1a !important; }
       statsHtml += 'ED<sub>50</sub>: ' + best.ED50.toFixed(1) + ' (dose at 50% of maximum effect)<br>';
       statsHtml += 'Predicted effect at ED<sub>50</sub>: ' + (best.E0 + best.Emax * 0.5).toFixed(3) + '<br>';
     }
-    statsHtml += 'R\u00B2 = ' + (best.R2 * 100).toFixed(1) + '% | AIC (relative) = ' + best.aic.toFixed(1) + ' | k = ' + best.nPoints + ' data points</div>';
+    statsHtml += 'R\u00B2 = ' + (best.R2 * 100).toFixed(1) + '% | AIC (relative) = ' + best.aic.toFixed(1) + ' | k = ' + best.nPoints + ' data points';
+    var drHet = computeDRHeterogeneity(data.points, best);
+    if (drHet) {
+      statsHtml += '<br><strong>DR Heterogeneity:</strong> Q<sub>DR</sub> = ' + drHet.Q_DR.toFixed(2) +
+        ' (df=' + drHet.df + ', p=' + (drHet.pValue < 0.001 ? '<0.001' : drHet.pValue.toFixed(3)) + ')' +
+        ' | I\u00B2<sub>DR</sub> = ' + drHet.I2_DR.toFixed(1) + '%';
+    }
+    statsHtml += '</div>';
     var looHtml = renderLeaveOneOutDR(data.points, best, best.model);
     el.innerHTML = '<h3 style="font-size:0.95rem;margin-bottom:8px">Dose-Response Curve</h3>' + svgHtml + statsHtml + tableHtml + looHtml;
   }

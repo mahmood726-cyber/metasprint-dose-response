@@ -228,6 +228,24 @@ class TestModelFitting:
         assert result['hasStudyD'] is True
 
 
+    def test_dr_heterogeneity(self, driver):
+        """computeDRHeterogeneity should return Q_DR, df, pValue, I2_DR."""
+        result = driver.execute_script("""
+            var pts = [];
+            for (var i = 0; i <= 8; i++) pts.push({dose: i, effect: 1 + 0.5*i + (Math.random()-0.5)*0.3, se: 0.15});
+            var model = fitLinearDR(pts);
+            if (!model) return null;
+            var het = computeDRHeterogeneity(pts, model);
+            return het;
+        """)
+        assert result is not None
+        assert 'Q_DR' in result
+        assert result['Q_DR'] >= 0
+        assert result['df'] > 0
+        assert 0 <= result['pValue'] <= 1
+        assert 0 <= result['I2_DR'] <= 100
+
+
 class TestEdgeCases:
     """Test edge cases and error handling."""
 
