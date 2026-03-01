@@ -169,6 +169,21 @@ class TestModelFitting:
         assert abs(result['slope'] - 0.4) < 0.15
         assert result['nStudy'] >= 3
 
+    def test_aic_weights_sum_to_one(self, driver):
+        result = driver.execute_script("""
+            var pts = [];
+            for (var i = 0; i <= 10; i++) pts.push({dose: i, effect: Math.log(i+1)*2, se: 0.2});
+            var c = compareDoseResponseModels(pts);
+            if (!c) return null;
+            var sumW = 0;
+            for (var j = 0; j < c.all.length; j++) sumW += c.all[j].aicWeight;
+            return {sumW: sumW, bestDelta: c.best.deltaAIC, bestWeight: c.best.aicWeight};
+        """)
+        assert result is not None
+        assert abs(result['sumW'] - 1.0) < 0.001, f"AIC weights sum to {result['sumW']}, expected 1.0"
+        assert result['bestDelta'] == 0, "Best model should have deltaAIC = 0"
+        assert result['bestWeight'] > 0, "Best model weight must be > 0"
+
     def test_model_comparison_includes_all(self, driver):
         result = driver.execute_script("""
             var pts = [];

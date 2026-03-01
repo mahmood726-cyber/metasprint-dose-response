@@ -10067,6 +10067,17 @@ body.dark-mode .input-error { background: #451a1a !important; }
     if (fp2) models.push(fp2);
     if (models.length === 0) return null;
     models.sort((a, b) => a.aic - b.aic);
+    // AIC model averaging weights (Burnham & Anderson 2002)
+    var minAIC = models[0].aic;
+    var sumExp = 0;
+    for (var i = 0; i < models.length; i++) {
+      models[i].deltaAIC = models[i].aic - minAIC;
+      models[i].aicLikelihood = Math.exp(-models[i].deltaAIC / 2);
+      sumExp += models[i].aicLikelihood;
+    }
+    for (var i = 0; i < models.length; i++) {
+      models[i].aicWeight = sumExp > 0 ? models[i].aicLikelihood / sumExp : 0;
+    }
     return { best: models[0], all: models };
   }
 
@@ -10082,6 +10093,8 @@ body.dark-mode .input-error { background: #451a1a !important; }
     html += '<thead><tr style="border-bottom:2px solid var(--border)">' +
       '<th style="padding:6px 10px;text-align:left">Model</th>' +
       '<th style="padding:6px 10px;text-align:right" title="Lower is better (relative scale)">AIC</th>' +
+      '<th style="padding:6px 10px;text-align:right" title="Difference from best model AIC">\u0394AIC</th>' +
+      '<th style="padding:6px 10px;text-align:right" title="Akaike weight: probability this is the best model">w<sub>i</sub></th>' +
       '<th style="padding:6px 10px;text-align:right" title="Lower is better (relative scale)">BIC</th>' +
       '<th style="padding:6px 10px;text-align:right">R\u00B2</th>' +
       '<th style="padding:6px 10px;text-align:right" title="p-value for non-linearity test">Non-lin. p</th>' +
@@ -10103,9 +10116,13 @@ body.dark-mode .input-error { background: #451a1a !important; }
       const pNL = (m.pNonlinear != null && isFinite(m.pNonlinear)) ? m.pNonlinear.toFixed(4)
                 : (m.pFP2vsFP1 != null && isFinite(m.pFP2vsFP1)) ? m.pFP2vsFP1.toFixed(4)
                 : '\u2014'; // em-dash
+      var deltaCell = (m.deltaAIC != null && isFinite(m.deltaAIC)) ? m.deltaAIC.toFixed(1) : '\u2014';
+      var weightCell = (m.aicWeight != null && isFinite(m.aicWeight)) ? (m.aicWeight * 100).toFixed(1) + '%' : '\u2014';
       html += '<tr style="border-bottom:1px solid var(--border);' + bg + '">' +
         '<td style="padding:5px 10px">' + m.model + (isBest ? ' \u2713' : '') + '</td>' +
         '<td style="padding:5px 10px;text-align:right">' + m.aic.toFixed(1) + '</td>' +
+        '<td style="padding:5px 10px;text-align:right">' + deltaCell + '</td>' +
+        '<td style="padding:5px 10px;text-align:right">' + weightCell + '</td>' +
         '<td style="padding:5px 10px;text-align:right">' + m.bic.toFixed(1) + '</td>' +
         '<td style="padding:5px 10px;text-align:right">' + (m.R2 * 100).toFixed(1) + '%</td>' +
         '<td style="padding:5px 10px;text-align:right">' + pNL + '</td>' +
