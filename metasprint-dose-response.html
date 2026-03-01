@@ -9889,6 +9889,28 @@ body.dark-mode .input-error { background: #451a1a !important; }
   // ═══════════════════════════════════════════════════════════════════════
 
   /**
+   * Master test runner — executes all dose-response self-test suites.
+   * Call from browser console: _runAllDRTests()
+   * @returns {boolean} true if all suites pass
+   */
+  function _runAllDRTests() {
+    console.log('=== MetaSprint Dose-Response Self-Tests ===');
+    const results = {};
+
+    try { results.matrix = _testMatrixOps(); } catch(e) { results.matrix = false; console.error('Matrix tests error:', e); }
+    try { results.rcs = _testRCS(); } catch(e) { results.rcs = false; console.error('RCS tests error:', e); }
+    try { results.fp = _testFP(); } catch(e) { results.fp = false; console.error('FP tests error:', e); }
+    try { results.oneStage = _testOneStage(); } catch(e) { results.oneStage = false; console.error('OneStage tests error:', e); }
+    try { results.continuous = _testContinuousInput(); } catch(e) { results.continuous = false; console.error('Continuous tests error:', e); }
+
+    console.log('=== Results ===');
+    console.table(results);
+    const allPass = Object.values(results).every(v => v === true);
+    console.log(allPass ? 'ALL TESTS PASSED' : 'SOME TESTS FAILED');
+    return allPass;
+  }
+
+  /**
    * Compare dose-response models and select the best by AIC.
    */
   function compareDoseResponseModels(points) {
