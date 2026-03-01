@@ -2515,6 +2515,44 @@ body.dark-mode .input-error { background: #451a1a !important; }
     return kwBest;
   }
 
+  // ── Dose-Ranging Trial Detection ──
+  const DOSE_UNIT_REGEX = /(\d+(?:\.\d+)?)\s*(mg|mcg|ug|µg|g|mg\/kg|mg\/m2|iu|units?|ml|mmol|nmol|pmol)(?:\b|\/)/gi;
+  const PLACEBO_ARM_REGEX = /\bplacebo\b|\bsham\b|\bcontrol\b|\bstandard\s+of\s+care\b|\bSOC\b|\bno\s+treatment\b/i;
+
+  function detectDoseRanging(trial) {
+    const arms = trial.arms || [];
+    const interventions = trial.interventions || [];
+    const allArmText = arms.map(a => typeof a === 'string' ? a : (a.label || a.name || ''));
+    const allIvText = interventions.map(iv => typeof iv === 'string' ? iv : (iv.name || ''));
+    const allText = [...allArmText, ...allIvText];
+    const doseLevels = new Set();
+    let doseUnit = '';
+    let armCount = 0;
+
+    for (const text of allText) {
+      if (PLACEBO_ARM_REGEX.test(text)) continue;
+      armCount++;
+      let match;
+      const regex = new RegExp(DOSE_UNIT_REGEX.source, DOSE_UNIT_REGEX.flags);
+      while ((match = regex.exec(text)) !== null) {
+        const doseVal = parseFloat(match[1]);
+        const unit = match[2].toLowerCase();
+        if (isFinite(doseVal) && doseVal > 0) {
+          doseLevels.add(doseVal);
+          if (!doseUnit) doseUnit = unit;
+        }
+      }
+    }
+
+    const levels = Array.from(doseLevels).sort((a, b) => a - b);
+    const isDoseRanging = levels.length >= 3;
+    trial.doseRanging = isDoseRanging;
+    trial.doseLevels = levels;
+    trial.doseUnit = doseUnit;
+    trial.doseArmCount = armCount;
+    return isDoseRanging;
+  }
+
   function getSubcategory(id) {
     return CARDIO_SUBCATEGORIES.find(c => c.id === id) || CARDIO_SUBCATEGORIES[9];
   }
@@ -3683,6 +3721,7 @@ body.dark-mode .input-error { background: #451a1a !important; }
             phase: (p.designModule?.phases || []).join(', ')
           };
           trial.subcategory = classifyTrial(trial);
+          detectDoseRanging(trial);
           batch.push(trial);
         }
         trials.push(...batch);
@@ -9889,6 +9928,44 @@ body.dark-mode .input-error { background: #451a1a !important; }
   // ═══════════════════════════════════════════════════════════════════════
 
   /**
+   * Self-test for dose-ranging trial detection.
+   */
+  function _testDoseRanging() {
+    const results = [];
+    // Multi-dose trial
+    const t1 = { arms: [{label:'Drug X 10 mg'},{label:'Drug X 20 mg'},{label:'Drug X 40 mg'},{label:'Placebo'}], interventions: [] };
+    detectDoseRanging(t1);
+    results.push({ test: 'multi-dose detected', pass: t1.doseRanging === true });
+    results.push({ test: '3 levels', pass: t1.doseLevels.length === 3 });
+    results.push({ test: 'unit=mg', pass: t1.doseUnit === 'mg' });
+    results.push({ test: 'sorted 10,20,40', pass: t1.doseLevels[0]===10 && t1.doseLevels[1]===20 && t1.doseLevels[2]===40 });
+
+    // Single dose = not DR
+    const t2 = { arms: [{label:'Drug Y 50 mg'},{label:'Placebo'}], interventions: [] };
+    detectDoseRanging(t2);
+    results.push({ test: 'single-dose not DR', pass: t2.doseRanging === false });
+
+    // Intervention names
+    const t3 = { arms: [], interventions: [{name:'Empagliflozin 10 mg'},{name:'Empagliflozin 25 mg'},{name:'Empagliflozin 50 mg'}] };
+    detectDoseRanging(t3);
+    results.push({ test: 'iv names detected', pass: t3.doseRanging === true });
+
+    // mg/kg
+    const t4 = { arms: [{label:'0.5 mg/kg'},{label:'1.0 mg/kg'},{label:'2.0 mg/kg'}], interventions: [] };
+    detectDoseRanging(t4);
+    results.push({ test: 'mg/kg detected', pass: t4.doseRanging === true });
+
+    // No dose info
+    const t5 = { arms: [{label:'Active Treatment'},{label:'Control'}], interventions: [] };
+    detectDoseRanging(t5);
+    results.push({ test: 'no dose=not DR', pass: t5.doseRanging === false });
+    results.push({ test: 'empty levels', pass: t5.doseLevels.length === 0 });
+
+    console.table(results);
+    return results.every(r => r.pass);
+  }
+
+  /**
    * Master test runner — executes all dose-response self-test suites.
    * Call from browser console: _runAllDRTests()
    * @returns {boolean} true if all suites pass
@@ -9902,6 +9979,7 @@ body.dark-mode .input-error { background: #451a1a !important; }
     try { results.fp = _testFP(); } catch(e) { results.fp = false; console.error('FP tests error:', e); }
     try { results.oneStage = _testOneStage(); } catch(e) { results.oneStage = false; console.error('OneStage tests error:', e); }
     try { results.continuous = _testContinuousInput(); } catch(e) { results.continuous = false; console.error('Continuous tests error:', e); }
+    try { results.doseRanging = _testDoseRanging(); } catch(e) { results.doseRanging = false; console.error('DoseRanging tests error:', e); }
 
     console.log('=== Results ===');
     console.table(results);
@@ -12121,6 +12199,7 @@ body.dark-mode .input-error { background: #451a1a !important; }
             source: 'aact'
           };
           trial.subcategory = classifyTrial(trial);
+          detectDoseRanging(trial);
           batch.push(trial);
         }
 
