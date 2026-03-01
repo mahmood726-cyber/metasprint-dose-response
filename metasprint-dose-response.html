@@ -1370,13 +1370,14 @@ body.dark-mode .input-error { background: #451a1a !important; }
         <label style="font-size:0.82rem;color:var(--text-muted)">Input mode:</label>
         <label style="font-size:0.82rem;cursor:pointer"><input type="radio" name="inputMode" value="effect" checked onchange="setInputMode('effect')"> One-stage (multi-point per study)</label>
         <label style="font-size:0.82rem;cursor:pointer"><input type="radio" name="inputMode" value="2x2" onchange="setInputMode('2x2')"> Two-stage (slope per study)</label>
+        <label style="font-size:0.82rem;cursor:pointer"><input type="radio" name="inputMode" value="continuous" onchange="setInputMode('continuous')"> Continuous (Mean/SD/N per dose)</label>
         <label style="font-size:0.82rem;cursor:pointer"><input type="checkbox" id="publishableGateToggle" checked> Strict publishability gates</label>
         <span id="inputModeHelp" style="font-size:0.78rem;color:var(--text-muted)">Enter one row per dose level per study: dose, N at that dose, effect (vs reference dose), and 95% CI. Reference dose is typically 0 (placebo).</span>
       </div>
       <div class="extract-table-wrap" style="overflow-x:auto">
       <table class="extract-table" id="extractTable">
         <caption class="sr-only">Data extraction table for included studies</caption>
-        <thead><tr id="extractHead">
+        <thead><tr id="extractHead" data-header="default">
           <th scope="col">Study ID</th><th scope="col">Trial ID *</th><th scope="col">NCT</th><th scope="col">PMID</th><th scope="col">DOI</th>
           <th scope="col">Outcome *</th><th scope="col">Timepoint *</th><th scope="col">Population</th><th scope="col">Verify</th>
           <th scope="col" title="Dose level (numeric, in dose units)">Dose *</th>
@@ -1390,6 +1391,12 @@ body.dark-mode .input-error { background: #451a1a !important; }
           <th scope="col" title="Type of effect measure">Type</th>
           <th scope="col" title="Subgroup label for stratified analysis">Subgroup</th>
           <th scope="col">Notes</th><th scope="col"></th>
+        </tr>
+        <tr id="extractHeaderContinuous" style="display:none">
+          <th scope="col">Study ID</th><th scope="col">Outcome *</th><th scope="col">Dose *</th>
+          <th scope="col">Unit</th><th scope="col">Ref Dose</th>
+          <th scope="col">N *</th><th scope="col">Mean *</th><th scope="col">SD *</th>
+          <th scope="col">Type</th><th scope="col">Subgroup</th><th scope="col">Notes</th><th scope="col"></th>
         </tr></thead>
         <tbody id="extractBody"></tbody>
       </table>
@@ -6596,9 +6603,25 @@ body.dark-mode .input-error { background: #451a1a !important; }
     extractInputMode = mode;
     var helpEl = document.getElementById('inputModeHelp');
     if (helpEl) {
-      helpEl.textContent = mode === '2x2'
-        ? 'Two-stage mode: enter one row per study with the dose-response slope (change in effect per unit dose) and its SE. Slopes will be pooled via DerSimonian-Laird.'
-        : 'One-stage mode: enter one row per dose level with dose, effect size, and 95% CI or SE. For ratio measures (OR, RR, HR), enter values on the natural scale (auto-logged).';
+      if (mode === '2x2') {
+        helpEl.textContent = 'Two-stage mode: enter one row per study with the dose-response slope (change in effect per unit dose) and its SE. Slopes will be pooled via DerSimonian-Laird.';
+      } else if (mode === 'continuous') {
+        helpEl.textContent = 'Enter Mean, SD, and N at each dose level. The app computes MD or SMD vs the reference dose.';
+      } else {
+        helpEl.textContent = 'One-stage mode: enter one row per dose level with dose, effect size, and 95% CI or SE. For ratio measures (OR, RR, HR), enter values on the natural scale (auto-logged).';
+      }
+    }
+    // Toggle header rows for continuous vs default mode
+    var defaultHeader = document.getElementById('extractHead');
+    var continuousHeader = document.getElementById('extractHeaderContinuous');
+    if (defaultHeader && continuousHeader) {
+      if (mode === 'continuous') {
+        defaultHeader.style.display = 'none';
+        continuousHeader.style.display = '';
+      } else {
+        defaultHeader.style.display = '';
+        continuousHeader.style.display = 'none';
+      }
     }
     // When switching to 2x2 mode, auto-compute effects for studies that have 2x2 data
     if (mode === '2x2') {
@@ -8185,6 +8208,53 @@ body.dark-mode .input-error { background: #451a1a !important; }
    * @returns {object} { points: [{studyId, dose, effect, se, weight}], studies: {id: [points]}, mode }
    */
   function prepareDoseResponseData(studies) {
+    // Continuous mode: compute MD or SMD from Mean/SD/N at each dose level
+    if (extractInputMode === 'continuous') {
+      const byStudy = {};
+      for (const s of studies) {
+        const key = s.studyId || s.trialId || 'unknown';
+        if (!byStudy[key]) byStudy[key] = [];
+        byStudy[key].push(s);
+      }
+      const points = [];
+      const effectType = studies[0]?.effectType === 'SMD' ? 'SMD' : 'MD';
+
+      for (const [studyId, rows] of Object.entries(byStudy)) {
+        const refDose = parseFloat(rows[0]?.refDose ?? 0);
+        const refRow = rows.find(r => Math.abs(parseFloat(r.dose) - refDose) < 1e-10);
+        if (!refRow) continue;
+        const refMean = parseFloat(refRow.mean);
+        const refSD = parseFloat(refRow.sd);
+        const refN = parseInt(refRow.n, 10);
+        if (!isFinite(refMean) || !isFinite(refSD) || refSD <= 0 || refN <= 0) continue;
+
+        for (const row of rows) {
+          const dose = parseFloat(row.dose);
+          if (Math.abs(dose - refDose) < 1e-10) continue;
+          const mean = parseFloat(row.mean);
+          const sd = parseFloat(row.sd);
+          const n = parseInt(row.n, 10);
+          if (!isFinite(mean) || !isFinite(sd) || sd <= 0 || n <= 0) continue;
+
+          let effect, se;
+          if (effectType === 'SMD') {
+            const df = n + refN - 2;
+            const pooledSD = Math.sqrt(((n - 1) * sd * sd + (refN - 1) * refSD * refSD) / df);
+            const J = df > 0 ? 1 - 3 / (4 * df - 1) : 1;
+            effect = J * (mean - refMean) / pooledSD;
+            se = Math.sqrt((n + refN) / (n * refN) + effect * effect / (2 * (n + refN)));
+          } else {
+            effect = mean - refMean;
+            se = Math.sqrt(sd * sd / n + refSD * refSD / refN);
+          }
+          if (isFinite(effect) && isFinite(se) && se > 0) {
+            points.push({ studyId, dose, effect, se, n });
+          }
+        }
+      }
+      return { mode: 'one-stage', points, studies: Object.keys(byStudy), isRatio: false };
+    }
+
     const is2stage = extractInputMode === '2x2';
     if (is2stage) {
       // Two-stage: each study contributes a single slope
@@ -8644,6 +8714,37 @@ body.dark-mode .input-error { background: #451a1a !important; }
   // ═══════════════════════════════════════════════════════════════════════
   // End NxN Matrix Operations
   // ═══════════════════════════════════════════════════════════════════════
+
+  /**
+   * Self-test for continuous input mode (Mean/SD/N per dose).
+   * Verifies that prepareDoseResponseData correctly computes MD from raw data.
+   */
+  function _testContinuousInput() {
+    const results = [];
+    // Save and override the global input mode
+    const orig = extractInputMode;
+    extractInputMode = 'continuous';
+
+    const studies = [
+      { studyId: 'S1', dose: '0', mean: '10', sd: '2', n: '50', refDose: '0', effectType: 'MD' },
+      { studyId: 'S1', dose: '5', mean: '12', sd: '2.1', n: '48', refDose: '0', effectType: 'MD' },
+      { studyId: 'S1', dose: '10', mean: '15', sd: '2.3', n: '52', refDose: '0', effectType: 'MD' },
+      { studyId: 'S2', dose: '0', mean: '9', sd: '1.8', n: '60', refDose: '0', effectType: 'MD' },
+      { studyId: 'S2', dose: '5', mean: '11.5', sd: '2.0', n: '55', refDose: '0', effectType: 'MD' },
+      { studyId: 'S2', dose: '10', mean: '14', sd: '2.2', n: '58', refDose: '0', effectType: 'MD' },
+    ];
+    const data = prepareDoseResponseData(studies);
+    extractInputMode = orig;
+
+    results.push({ test: 'mode=one-stage', pass: data.mode === 'one-stage' });
+    results.push({ test: '4 points (2 studies x 2 non-ref)', pass: data.points.length === 4 });
+    results.push({ test: 'S1 dose=5 effect~2', pass: Math.abs((data.points[0]?.effect ?? 99) - 2) < 0.5 });
+    results.push({ test: 'all SE > 0', pass: data.points.every(p => p.se > 0) });
+    results.push({ test: 'isRatio false', pass: data.isRatio === false });
+
+    console.table(results);
+    return results.every(r => r.pass);
+  }
 
   /**
    * Emax model: y = E0 + Emax * dose / (ED50 + dose)
