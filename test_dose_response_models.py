@@ -40,6 +40,9 @@ class TestSelfTests:
             var f = _testFP(); if (f.failed > 0) ok = false;
             if (!_testOneStage()) ok = false;
             if (!_testContinuousInput()) ok = false;
+            if (!_testAICWeights()) ok = false;
+            if (!_testDRHeterogeneity()) ok = false;
+            if (!_testCSVParser()) ok = false;
             return ok;
         """)
         assert result is True, 'Inline self-tests failed'

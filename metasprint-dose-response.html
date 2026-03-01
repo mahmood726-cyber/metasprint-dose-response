@@ -10176,6 +10176,45 @@ body.dark-mode .input-error { background: #451a1a !important; }
     return results.every(function(r) { return r.pass; });
   }
 
+  function _testAICWeights() {
+    var pts = [];
+    for (var i = 0; i <= 8; i++) pts.push({dose: i, effect: 1 + 0.5*i, se: 0.15});
+    var c = compareDoseResponseModels(pts);
+    if (!c || !c.all || c.all.length === 0) return false;
+    var sumW = 0;
+    for (var j = 0; j < c.all.length; j++) {
+      if (c.all[j].aicWeight == null) return false;
+      sumW += c.all[j].aicWeight;
+    }
+    if (Math.abs(sumW - 1.0) > 0.01) return false;
+    if (c.best.deltaAIC !== 0) return false;
+    return true;
+  }
+
+  function _testDRHeterogeneity() {
+    var pts = [];
+    for (var i = 0; i <= 6; i++) pts.push({dose: i, effect: 1 + 0.5*i, se: 0.15});
+    var model = fitLinearDR(pts);
+    if (!model) return false;
+    var het = computeDRHeterogeneity(pts, model);
+    if (!het) return false;
+    if (het.Q_DR < 0 || het.df <= 0) return false;
+    if (het.pValue < 0 || het.pValue > 1) return false;
+    if (het.I2_DR < 0 || het.I2_DR > 100) return false;
+    return true;
+  }
+
+  function _testCSVParser() {
+    var line = parseCSVLine('a,"b,c",d', ',');
+    if (line.length !== 3 || line[1] !== 'b,c') return false;
+    if (parseFloatSafe('0') !== 0) return false;
+    if (parseFloatSafe('') !== null) return false;
+    if (parseFloatSafe('abc') !== null) return false;
+    if (parseIntSafe('42') !== 42) return false;
+    if (parseIntSafe('') !== null) return false;
+    return true;
+  }
+
   /**
    * Master test runner — executes all dose-response self-test suites.
    * Call from browser console: _runAllDRTests()
@@ -10192,6 +10231,9 @@ body.dark-mode .input-error { background: #451a1a !important; }
     try { results.continuous = _testContinuousInput(); } catch(e) { results.continuous = false; console.error('Continuous tests error:', e); }
     try { results.doseRanging = _testDoseRanging(); } catch(e) { results.doseRanging = false; console.error('DoseRanging tests error:', e); }
     try { results.drSignal = _testDRSignal(); } catch(e) { results.drSignal = false; console.error('DRSignal tests error:', e); }
+    try { results.aicWeights = _testAICWeights(); } catch(e) { results.aicWeights = false; console.error('AICWeights tests error:', e); }
+    try { results.drHeterogeneity = _testDRHeterogeneity(); } catch(e) { results.drHeterogeneity = false; console.error('DRHeterogeneity tests error:', e); }
+    try { results.csvParser = _testCSVParser(); } catch(e) { results.csvParser = false; console.error('CSVParser tests error:', e); }
 
     console.log('=== Results ===');
     console.table(results);
