@@ -13651,6 +13651,67 @@ body.dark-mode .input-error { background: #451a1a !important; }
     switchPhase('protocol');
     loadPICO();
     showToast('PICO populated from ' + cat.label + ' universe', 'success');
+
+    // DR-specific search enhancement
+    const drTrialsForDrug = (currentGridTrials || []).filter(function(t) {
+      if (!t.doseRanging) return false;
+      var ivText = (t.interventions || []).map(function(iv) {
+        return typeof iv === 'string' ? iv : (iv.name || '');
+      }).join(' ').toLowerCase();
+      return ivText.includes(pickedIntervention.toLowerCase().slice(0, 10));
+    });
+
+    if (drTrialsForDrug.length > 0) {
+      // Enhance PICO with DR MeSH and keywords for downstream search
+      var drSearchTerms = '"Dose-Response Relationship, Drug"[MeSH] OR dose-response OR dose-ranging OR dose-finding OR dose-titration';
+
+      // Update PICO fields after phase switch renders them
+      setTimeout(function() {
+        // Update PICO I to include dose framing
+        var picoIField = document.getElementById('picoI');
+        if (picoIField) {
+          var doseLevels = [];
+          var seen = {};
+          drTrialsForDrug.forEach(function(t) {
+            (t.doseLevels || []).forEach(function(d) {
+              if (!seen[d]) { seen[d] = true; doseLevels.push(d); }
+            });
+          });
+          doseLevels.sort(function(a, b) { return a - b; });
+          var unit = drTrialsForDrug[0].doseUnit || 'mg';
+          if (doseLevels.length > 0) {
+            picoIField.value = pickedIntervention + ' at multiple doses (' + doseLevels.join(', ') + ' ' + unit + ')';
+          }
+        }
+
+        // Update PICO C for dose-response comparator framing
+        var picoCField = document.getElementById('picoC');
+        if (picoCField) {
+          var allDoses = [];
+          drTrialsForDrug.forEach(function(t) {
+            (t.doseLevels || []).forEach(function(d) { allDoses.push(d); });
+          });
+          allDoses.sort(function(a, b) { return a - b; });
+          var minDose = allDoses[0];
+          var doseUnit = drTrialsForDrug[0].doseUnit || 'mg';
+          picoCField.value = minDose ? 'placebo or lowest dose (' + minDose + ' ' + doseUnit + ')' : 'placebo or lowest dose';
+        }
+
+        // Update PICO O to append dose-response MeSH framing
+        var picoOField = document.getElementById('picoO');
+        if (picoOField && picoOField.value && !picoOField.value.includes('dose-response')) {
+          picoOField.value = picoOField.value + ' AND (' + drSearchTerms + ')';
+        }
+
+        // Persist updated PICO to project
+        if (project) {
+          project.pico.I = picoIField ? picoIField.value : project.pico.I;
+          project.pico.C = picoCField ? picoCField.value : project.pico.C;
+          project.pico.O = picoOField ? picoOField.value : project.pico.O;
+          idbPut('projects', project);
+        }
+      }, 200); // setTimeout to allow phase switch to render PICO fields
+    }
   }
 
   function sortUniverse(mode, btn) {
