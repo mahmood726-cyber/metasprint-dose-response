@@ -200,6 +200,33 @@ class TestModelFitting:
         assert 'Lin' in model_prefixes
         assert 'Qua' in model_prefixes
 
+    def test_leave_one_out_dr(self, driver):
+        """renderLeaveOneOutDR should produce a table with baseline + one row per study."""
+        result = driver.execute_script("""
+            var pts = [];
+            var studies = ['StudyA','StudyB','StudyC','StudyD'];
+            for (var s = 0; s < studies.length; s++) {
+                for (var d = 0; d <= 4; d++) {
+                    pts.push({dose: d, effect: 1 + 0.3*d + (s-1.5)*0.2, se: 0.15, studyId: studies[s]});
+                }
+            }
+            var model = fitLinearDR(pts);
+            if (!model) return null;
+            var html = renderLeaveOneOutDR(pts, model, 'Linear');
+            return {
+                hasTable: html.includes('<table'),
+                hasAllStudies: html.includes('All studies'),
+                hasStudyA: html.includes('StudyA'),
+                hasStudyD: html.includes('StudyD'),
+                length: html.length
+            };
+        """)
+        assert result is not None
+        assert result['hasTable'] is True
+        assert result['hasAllStudies'] is True
+        assert result['hasStudyA'] is True
+        assert result['hasStudyD'] is True
+
 
 class TestEdgeCases:
     """Test edge cases and error handling."""

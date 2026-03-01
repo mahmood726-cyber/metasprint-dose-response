@@ -10133,6 +10133,100 @@ body.dark-mode .input-error { background: #451a1a !important; }
   }
 
   /**
+   * Render leave-one-out influence analysis for dose-response.
+   * Re-fits the selected model k times, each time omitting one study.
+   * @param {Array} points - dose-response data points [{dose, effect, se, studyId}]
+   * @param {Object} fullModel - the model fitted on all data
+   * @param {string} modelType - model name (e.g. 'Linear', 'RCS-3')
+   * @returns {string} HTML table
+   */
+  function renderLeaveOneOutDR(points, fullModel, modelType) {
+    // Group points by study
+    var studyIds = [];
+    var seen = {};
+    for (var i = 0; i < points.length; i++) {
+      var sid = points[i].studyId ?? ('Row' + i);
+      if (!seen[sid]) { seen[sid] = true; studyIds.push(sid); }
+    }
+    if (studyIds.length < 3) return ''; // Need at least 3 studies
+
+    var fitFn;
+    switch (modelType) {
+      case 'Linear': fitFn = fitLinearDR; break;
+      case 'Quadratic': fitFn = fitQuadraticDR; break;
+      case 'Emax': fitFn = fitEmaxDR; break;
+      default:
+        if (modelType.startsWith('RCS-3')) fitFn = function(p) { return fitRCSDR(p, 3); };
+        else if (modelType.startsWith('RCS-4')) fitFn = function(p) { return fitRCSDR(p, 4); };
+        else if (modelType.startsWith('FP1')) fitFn = fitFP1DR;
+        else if (modelType.startsWith('FP2')) fitFn = fitFP2DR;
+        else fitFn = fitLinearDR;
+    }
+
+    var results = [];
+    for (var s = 0; s < studyIds.length; s++) {
+      var omitId = studyIds[s];
+      var subset = points.filter(function(p) { return (p.studyId ?? ('Row' + points.indexOf(p))) !== omitId; });
+      if (subset.length < 3) continue;
+      var refitted = fitFn(subset);
+      if (refitted) {
+        results.push({
+          omitted: omitId,
+          aic: refitted.aic,
+          bic: refitted.bic,
+          R2: refitted.R2,
+          deltaAIC: refitted.aic - fullModel.aic,
+          b1: refitted.b1 ?? null
+        });
+      }
+    }
+
+    if (results.length === 0) return '';
+
+    var hasSlope = results[0].b1 != null;
+
+    var html = '<h3 style="font-size:0.95rem;margin:16px 0 8px">Leave-One-Out Influence Analysis</h3>';
+    html += '<p style="font-size:0.78rem;color:var(--text-muted);margin-bottom:6px">Each row shows model fit with that study removed. Large \u0394AIC indicates influential study.</p>';
+    html += '<table style="font-size:0.82rem;border-collapse:collapse;width:100%;max-width:700px">';
+    html += '<thead><tr style="border-bottom:2px solid var(--border)">';
+    html += '<th style="padding:6px 10px;text-align:left">Omitted Study</th>';
+    html += '<th style="padding:6px 10px;text-align:right">AIC</th>';
+    html += '<th style="padding:6px 10px;text-align:right">\u0394AIC</th>';
+    html += '<th style="padding:6px 10px;text-align:right">R\u00B2</th>';
+    if (hasSlope) {
+      html += '<th style="padding:6px 10px;text-align:right">Slope (\u03B2\u2081)</th>';
+    }
+    html += '</tr></thead><tbody>';
+
+    // Baseline row
+    html += '<tr style="border-bottom:1px solid var(--border);background:rgba(37,99,235,0.05);font-weight:600">';
+    html += '<td style="padding:5px 10px">(All studies)</td>';
+    html += '<td style="padding:5px 10px;text-align:right">' + fullModel.aic.toFixed(1) + '</td>';
+    html += '<td style="padding:5px 10px;text-align:right">\u2014</td>';
+    html += '<td style="padding:5px 10px;text-align:right">' + (fullModel.R2 * 100).toFixed(1) + '%</td>';
+    if (hasSlope) {
+      html += '<td style="padding:5px 10px;text-align:right">' + (fullModel.b1 != null ? fullModel.b1.toFixed(4) : '\u2014') + '</td>';
+    }
+    html += '</tr>';
+
+    for (var r = 0; r < results.length; r++) {
+      var row = results[r];
+      var influence = Math.abs(row.deltaAIC) > 2 ? 'color:#ef4444;font-weight:600' : '';
+      html += '<tr style="border-bottom:1px solid var(--border)">';
+      html += '<td style="padding:5px 10px">' + escapeHtml(row.omitted) + '</td>';
+      html += '<td style="padding:5px 10px;text-align:right">' + row.aic.toFixed(1) + '</td>';
+      html += '<td style="padding:5px 10px;text-align:right;' + influence + '">' + (row.deltaAIC > 0 ? '+' : '') + row.deltaAIC.toFixed(1) + '</td>';
+      html += '<td style="padding:5px 10px;text-align:right">' + (row.R2 * 100).toFixed(1) + '%</td>';
+      if (hasSlope) {
+        html += '<td style="padding:5px 10px;text-align:right">' + row.b1.toFixed(4) + '</td>';
+      }
+      html += '</tr>';
+    }
+    html += '</tbody></table>';
+    return html;
+  }
+
+  /**
    * Render dose-response analysis: curve plot + model comparison table.
    */
   function renderDoseResponseAnalysis(studies, confLevel) {
@@ -10208,7 +10302,9 @@ body.dark-mode .input-error { background: #451a1a !important; }
           el.innerHTML = '<h3 style="font-size:0.95rem;margin-bottom:8px">Dose-Response Curve (One-Stage Mixed-Effects)</h3>' +
             svgHtml +
             '<p style="font-size:0.82rem;margin-top:8px">' + convHtml + '</p>' + vcHtml;
+          var looHtml = renderLeaveOneOutDR(data.points, oneStageResult, oneStageResult.model);
           if (tableHtml) el.innerHTML += tableHtml;
+          el.innerHTML += looHtml;
           return;
         }
       }
@@ -10262,7 +10358,8 @@ body.dark-mode .input-error { background: #451a1a !important; }
       statsHtml += 'Predicted effect at ED<sub>50</sub>: ' + (best.E0 + best.Emax * 0.5).toFixed(3) + '<br>';
     }
     statsHtml += 'R\u00B2 = ' + (best.R2 * 100).toFixed(1) + '% | AIC (relative) = ' + best.aic.toFixed(1) + ' | k = ' + best.nPoints + ' data points</div>';
-    el.innerHTML = '<h3 style="font-size:0.95rem;margin-bottom:8px">Dose-Response Curve</h3>' + svgHtml + statsHtml + tableHtml;
+    var looHtml = renderLeaveOneOutDR(data.points, best, best.model);
+    el.innerHTML = '<h3 style="font-size:0.95rem;margin-bottom:8px">Dose-Response Curve</h3>' + svgHtml + statsHtml + tableHtml + looHtml;
   }
 
   /**
