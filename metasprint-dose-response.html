@@ -1132,6 +1132,7 @@ body.dark-mode .input-error { background: #451a1a !important; }
           <button class="view-tab" data-view="matrix" onclick="switchUniverseView('matrix')" role="tab" aria-selected="false" title="I x O Matrix: Intervention-by-Outcome cross-tabulation — find which drug-outcome pairs have evidence">I x O Matrix</button>
           <button class="view-tab" data-view="gapscatter" onclick="switchUniverseView('gapscatter')" role="tab" aria-selected="false" title="Gap Scatter: Plots evidence gaps — high gap score = under-studied drug-outcome pair worth investigating">Gap Scatter</button>
           <button class="view-tab" data-view="pipeline" onclick="switchUniverseView('pipeline')" role="tab" aria-selected="false" title="Phase Pipeline: Trial phase distribution (I/II/III/IV) for each drug class — where is the research?">Phase Pipeline</button>
+          <button class="view-tab" data-view="drlandscape" onclick="switchUniverseView('drlandscape')" role="tab" aria-selected="false" title="DR Landscape: Dose-ranging trial distribution by drug class">DR Landscape</button>
         </div>
         <div class="universe-vis-container" id="universeVisContainer">
           <canvas id="ayatCanvas" class="universe-canvas universe-view active" aria-label="Ayat Universe — deep evidence landscape" style="height:600px"></canvas>
@@ -1150,6 +1151,7 @@ body.dark-mode .input-error { background: #451a1a !important; }
           <canvas id="gapScatterCanvas" class="universe-canvas universe-view" aria-label="Gap analysis scatter plot"></canvas>
           <svg id="pipelineSvg" class="network-svg universe-view" viewBox="0 0 900 500"
                role="img" aria-label="Trial phase pipeline"></svg>
+          <div id="universeViewDRLandscape" class="universe-view" style="display:none"></div>
         </div>
         <div class="network-tooltip" id="networkTooltip"></div>
         <div class="gap-scatter-tooltip" id="gapScatterTooltip"></div>
@@ -1167,6 +1169,7 @@ body.dark-mode .input-error { background: #451a1a !important; }
           <button class="filter-btn active" onclick="sortUniverse('gap',this)">Top Opportunities</button>
           <button class="filter-btn" onclick="sortUniverse('recent',this)">Most Recent</button>
           <button class="filter-btn" onclick="sortUniverse('count',this)">Most RCTs</button>
+          <label style="font-size:0.8rem;cursor:pointer;margin-left:12px;display:flex;align-items:center;gap:3px" title="Show only drug classes with dose-ranging trials"><input type="checkbox" id="drFilterToggle" onchange="filterUniverseGridDR(this.checked)"> DR only</label>
           <span class="text-muted" style="margin-left:auto;font-size:0.8rem" id="universeStats"></span>
         </div>
         <div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap;margin-top:6px">
@@ -13172,10 +13175,14 @@ body.dark-mode .input-error { background: #451a1a !important; }
       const curYear = new Date().getFullYear();
       for (let y = curYear - 9; y <= curYear; y++) sparkYears.push(years[y] || 0);
       const maxSpk = Math.max(1, ...sparkYears);
+      const drCount = c.trials.filter(t => t.doseRanging).length;
+      const drBadge = drCount > 0
+        ? ' <span style="display:inline-block;background:#7c3aed;color:#fff;padding:1px 6px;border-radius:8px;font-size:0.7rem;margin-left:4px" title="' + drCount + ' dose-ranging trial' + (drCount !== 1 ? 's' : '') + '">' + drCount + ' DR</span>'
+        : '';
 
       return '<div class="universe-card" tabindex="0" role="article" aria-label="' + escapeHtml(c.label) + ': ' + c.trials.length + ' RCTs, ' + c.recentCount + ' recent">' +
         '<div class="card-heat ' + (c.recentCount > 5 ? 'heat-hot' : c.recentCount > 2 ? 'heat-warm' : 'heat-cool') + '"></div>' +
-        '<h4>' + escapeHtml(c.label) + '</h4>' +
+        '<h4>' + escapeHtml(c.label) + drBadge + '</h4>' +
         '<div class="card-stats">' +
           '<div class="card-stat"><div class="card-stat-value">' + c.trials.length + '</div><div class="card-stat-label">RCTs</div></div>' +
           '<div class="card-stat"><div class="card-stat-value">' + c.recentCount + '</div><div class="card-stat-label">Recent (3yr)</div></div>' +
@@ -13657,6 +13664,16 @@ body.dark-mode .input-error { background: #451a1a !important; }
       return;
     }
     renderUniverseGrid(currentGridTrials, currentGridSubcat, mode);
+  }
+
+  function filterUniverseGridDR(onlyDR) {
+    if (typeof currentGridTrials === 'undefined' || !currentGridTrials) return;
+    if (onlyDR) {
+      const drTrials = currentGridTrials.filter(t => t.doseRanging);
+      renderUniverseGrid(drTrials, currentGridSubcat);
+    } else {
+      renderUniverseGrid(currentGridTrials, currentGridSubcat);
+    }
   }
 
   // ============================================================
