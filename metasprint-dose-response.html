@@ -9571,6 +9571,316 @@ body.dark-mode .input-error { background: #451a1a !important; }
   // End Restricted Cubic Splines (RCS)
   // ═══════════════════════════════════════════════════════════════════════
 
+  // ═══════════════════════════════════════════════════════════════════════
+  // One-Stage Mixed-Effects Dose-Response Model
+  // ═══════════════════════════════════════════════════════════════════════
+
+  /**
+   * Fit a one-stage mixed-effects dose-response model.
+   * Random intercept + random slope (dose) per study.
+   *
+   * @param {Array<{studyId: string, points: Array<{dose: number, effect: number, se: number}>}>} studyGroups
+   * @param {'linear'|'quadratic'} modelType - Fixed-effects design matrix type
+   * @param {number} [nKnots] - Reserved for future RCS extension
+   * @returns {object|null} Model result or null if insufficient data
+   */
+  function fitOneStageMixedEffects(studyGroups, modelType, nKnots) {
+    // Validate inputs
+    if (!studyGroups || studyGroups.length < 2) return null;
+
+    // Flatten all points and count total
+    const allPoints = [];
+    for (const sg of studyGroups) {
+      if (!sg.points || sg.points.length === 0) continue;
+      for (const pt of sg.points) {
+        allPoints.push({ studyId: sg.studyId, dose: pt.dose, effect: pt.effect, se: pt.se });
+      }
+    }
+
+    const n = allPoints.length;
+    const pFixed = modelType === 'quadratic' ? 3 : 2; // intercept + dose [+ dose^2]
+
+    // Need at least pFixed + 1 total points
+    if (n < pFixed + 1) return null;
+
+    // Build fixed-effects design matrix X and response vector y
+    const X = [];
+    const y = [];
+    const ses = [];
+    const doses = [];
+    const studyIds = [];
+    for (const pt of allPoints) {
+      if (modelType === 'quadratic') {
+        X.push([1, pt.dose, pt.dose * pt.dose]);
+      } else {
+        X.push([1, pt.dose]);
+      }
+      y.push(pt.effect);
+      ses.push(pt.se);
+      doses.push(pt.dose);
+      studyIds.push(pt.studyId);
+    }
+
+    // Organize points by study for random-effects estimation
+    const studyMap = {};
+    for (let i = 0; i < n; i++) {
+      const sid = studyIds[i];
+      if (!studyMap[sid]) studyMap[sid] = [];
+      studyMap[sid].push({ idx: i, dose: doses[i], effect: y[i], se: ses[i] });
+    }
+    const studyKeys = Object.keys(studyMap);
+    const K = studyKeys.length;
+    if (K < 2) return null;
+
+    // Initialize variance components
+    let tau2_0 = 0.01; // random intercept variance
+    let tau2_1 = 0.001; // random slope variance
+
+    // Initial weights (pure inverse-variance)
+    const w = new Array(n);
+    for (let i = 0; i < n; i++) {
+      const se2 = ses[i] * ses[i];
+      const margVar = se2 + tau2_0 + tau2_1 * doses[i] * doses[i];
+      w[i] = margVar > 1e-15 ? 1 / margVar : 1 / 1e-15;
+    }
+
+    // Iterative estimation
+    let beta = null;
+    let vcov = null;
+    let fitted = null;
+    let residuals = null;
+    let converged = false;
+    let iterations = 0;
+    const maxIter = 50;
+    const convTol = 1e-6;
+
+    for (let iter = 0; iter < maxIter; iter++) {
+      iterations = iter + 1;
+
+      // Fit WLS with current weights
+      const fit = wlsFit(X, y, w);
+      if (!fit) {
+        // Singular design — try returning previous estimate if we have one
+        if (beta !== null) break;
+        return null;
+      }
+
+      const betaNew = fit.beta;
+
+      // Check convergence against previous beta
+      if (beta !== null) {
+        let maxDiff = 0;
+        for (let j = 0; j < pFixed; j++) {
+          maxDiff = Math.max(maxDiff, Math.abs(betaNew[j] - beta[j]));
+        }
+        if (maxDiff < convTol) {
+          beta = betaNew;
+          vcov = fit.vcov;
+          fitted = fit.fitted;
+          residuals = fit.residuals;
+          converged = true;
+          break;
+        }
+      }
+
+      beta = betaNew;
+      vcov = fit.vcov;
+      fitted = fit.fitted;
+      residuals = fit.residuals;
+
+      // Update variance components via method of moments
+      // For each study, compute mean residual (intercept) and slope of residuals vs dose
+      let sumMeanResid2 = 0;
+      let sumSlopeResid2 = 0;
+      let sumSe2 = 0;
+      let countSe2 = 0;
+
+      for (const sid of studyKeys) {
+        const pts = studyMap[sid];
+        const nk = pts.length;
+
+        // Mean residual for this study
+        let meanResid = 0;
+        for (const p of pts) {
+          meanResid += residuals[p.idx];
+        }
+        meanResid /= nk;
+        sumMeanResid2 += meanResid * meanResid;
+
+        // Slope of residuals vs dose (simple regression through residuals)
+        if (nk >= 2) {
+          let sumD = 0, sumR = 0, sumDD = 0, sumDR = 0;
+          for (const p of pts) {
+            const r = residuals[p.idx];
+            sumD += p.dose;
+            sumR += r;
+            sumDD += p.dose * p.dose;
+            sumDR += p.dose * r;
+          }
+          const denom = nk * sumDD - sumD * sumD;
+          if (Math.abs(denom) > 1e-15) {
+            const slopeResid = (nk * sumDR - sumD * sumR) / denom;
+            sumSlopeResid2 += slopeResid * slopeResid;
+          }
+        }
+
+        // Accumulate mean se^2
+        for (const p of pts) {
+          sumSe2 += p.se * p.se;
+          countSe2++;
+        }
+      }
+
+      const meanSe2 = countSe2 > 0 ? sumSe2 / countSe2 : 0;
+
+      // Update tau2 estimates (method of moments, clamped at 0)
+      tau2_0 = Math.max(0, sumMeanResid2 / K - meanSe2);
+      tau2_1 = Math.max(0, sumSlopeResid2 / K - meanSe2 * 0.1);
+
+      // Update weights with new variance components
+      for (let i = 0; i < n; i++) {
+        const se2 = ses[i] * ses[i];
+        const margVar = se2 + tau2_0 + tau2_1 * doses[i] * doses[i];
+        w[i] = margVar > 1e-15 ? 1 / margVar : 1 / 1e-15;
+      }
+    }
+
+    // If we never got a valid fit, return null
+    if (beta === null) return null;
+
+    // Goodness of fit
+    let ssRes = 0, ssTot = 0, sw = 0, swy = 0;
+    for (let i = 0; i < n; i++) {
+      sw += w[i];
+      swy += w[i] * y[i];
+    }
+    const yBar = sw > 0 ? swy / sw : 0;
+    for (let i = 0; i < n; i++) {
+      ssRes += w[i] * residuals[i] * residuals[i];
+      ssTot += w[i] * (y[i] - yBar) * (y[i] - yBar);
+    }
+    const R2 = ssTot > 0 ? 1 - ssRes / ssTot : 0;
+
+    // AIC/BIC: pFixed fixed effects + 2 variance components
+    const nParams = pFixed + 2;
+    const logLikPart = n * Math.log(ssRes / n + 1e-15);
+    const aic = logLikPart + 2 * nParams;
+    const bic = logLikPart + nParams * Math.log(n);
+
+    // Build per-study models
+    const studyModels = [];
+    for (const sid of studyKeys) {
+      const pts = studyMap[sid];
+      const nk = pts.length;
+      if (nk < pFixed) continue; // need enough points for the model
+
+      const Xk = [];
+      const yk = [];
+      const wk = [];
+      for (const p of pts) {
+        if (modelType === 'quadratic') {
+          Xk.push([1, p.dose, p.dose * p.dose]);
+        } else {
+          Xk.push([1, p.dose]);
+        }
+        yk.push(p.effect);
+        const se2 = p.se * p.se;
+        const margVar = se2 + tau2_0 + tau2_1 * p.dose * p.dose;
+        wk.push(margVar > 1e-15 ? 1 / margVar : 1 / 1e-15);
+      }
+
+      const studyFit = wlsFit(Xk, yk, wk);
+      if (studyFit) {
+        const sBeta = studyFit.beta;
+        studyModels.push({
+          studyId: sid,
+          beta: sBeta,
+          predict: modelType === 'quadratic'
+            ? (d) => sBeta[0] + sBeta[1] * d + sBeta[2] * d * d
+            : (d) => sBeta[0] + sBeta[1] * d
+        });
+      }
+    }
+
+    // Prediction functions using population-level (fixed) effects
+    const predictFn = modelType === 'quadratic'
+      ? (d) => beta[0] + beta[1] * d + beta[2] * d * d
+      : (d) => beta[0] + beta[1] * d;
+
+    const predictCIFn = (d, zCrit) => {
+      const yh = predictFn(d);
+      const xVec = modelType === 'quadratic' ? [1, d, d * d] : [1, d];
+      let varYh = 0;
+      if (vcov) {
+        for (let i = 0; i < pFixed; i++) {
+          for (let j = 0; j < pFixed; j++) {
+            varYh += xVec[i] * vcov[i][j] * xVec[j];
+          }
+        }
+      }
+      const seYh = Math.sqrt(Math.max(0, varYh));
+      return { y: yh, lo: yh - zCrit * seYh, hi: yh + zCrit * seYh };
+    };
+
+    // Parameter string for display
+    const betaStrs = beta.map((b, i) => 'b' + i + '=' + b.toFixed(4));
+    const paramStr = 'OneStageME(' + modelType + '): ' + betaStrs.join(', ') +
+      ', tau2_int=' + tau2_0.toFixed(4) + ', tau2_slp=' + tau2_1.toFixed(4);
+
+    return {
+      model: 'OneStageME-' + (modelType === 'quadratic' ? 'Quad' : 'Linear'),
+      beta: beta,
+      vcov: vcov,
+      tau2_intercept: tau2_0,
+      tau2_slope: tau2_1,
+      R2: R2,
+      aic: aic,
+      bic: bic,
+      fitted: fitted,
+      residuals: residuals,
+      predict: predictFn,
+      predictCI: predictCIFn,
+      studyModels: studyModels,
+      convergence: { converged: converged, iterations: iterations, tolerance: convTol },
+      paramStr: paramStr,
+      nParams: nParams,
+      nPoints: n,
+      nStudies: K
+    };
+  }
+
+  /**
+   * Self-test for one-stage mixed-effects dose-response model.
+   */
+  function _testOneStage() {
+    const results = [];
+    // 3 studies, 4 dose levels each, y = intercept + 0.5*dose with slight between-study variation
+    const groups = [];
+    for (let s = 0; s < 3; s++) {
+      const points = [];
+      const intercept = 1 + (s - 1) * 0.2;
+      for (let d = 0; d <= 3; d++)
+        points.push({ dose: d, effect: intercept + 0.5 * d, se: 0.15 });
+      groups.push({ studyId: 'Study' + (s + 1), points });
+    }
+    const result = fitOneStageMixedEffects(groups, 'linear');
+    results.push({ test: '1-stage fits', pass: result !== null });
+    results.push({ test: 'converged', pass: result?.convergence?.converged === true });
+    results.push({ test: 'slope ~0.5', pass: Math.abs((result?.beta?.[1] ?? 0) - 0.5) < 0.2 });
+    results.push({ test: 'has study models', pass: (result?.studyModels?.length ?? 0) >= 2 });
+    results.push({ test: 'tau2 >= 0', pass: (result?.tau2_intercept ?? -1) >= 0 });
+    results.push({ test: 'has predict', pass: typeof result?.predict === 'function' });
+    results.push({ test: 'has predictCI', pass: typeof result?.predictCI === 'function' });
+    // Edge: 1 study → null
+    results.push({ test: 'null if K<2', pass: fitOneStageMixedEffects([groups[0]], 'linear') === null });
+    console.table(results);
+    return results.every(r => r.pass);
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // End One-Stage Mixed-Effects Dose-Response Model
+  // ═══════════════════════════════════════════════════════════════════════
+
   /**
    * Compare dose-response models and select the best by AIC.
    */
