@@ -8359,6 +8359,292 @@ body.dark-mode .input-error { background: #451a1a !important; }
     };
   }
 
+  // ═══════════════════════════════════════════════════════════════════════
+  // General NxN Matrix Operations + Weighted Least Squares Solver
+  // Foundation for RCS, Fractional Polynomials, and One-Stage Mixed-Effects
+  // ═══════════════════════════════════════════════════════════════════════
+
+  /**
+   * Create an rows×cols zero matrix (2D array).
+   * @param {number} rows
+   * @param {number} cols
+   * @returns {number[][]}
+   */
+  function matCreate(rows, cols) {
+    const A = [];
+    for (let i = 0; i < rows; i++) {
+      A[i] = [];
+      for (let j = 0; j < cols; j++) A[i][j] = 0;
+    }
+    return A;
+  }
+
+  /**
+   * Transpose matrix A (m×n → n×m).
+   * @param {number[][]} A
+   * @returns {number[][]}
+   */
+  function matTranspose(A) {
+    const m = A.length, n = A[0].length;
+    const T = matCreate(n, m);
+    for (let i = 0; i < m; i++)
+      for (let j = 0; j < n; j++)
+        T[j][i] = A[i][j];
+    return T;
+  }
+
+  /**
+   * Multiply matrices A (m×p) and B (p×n) → C (m×n).
+   * @param {number[][]} A
+   * @param {number[][]} B
+   * @returns {number[][]}
+   */
+  function matMul(A, B) {
+    const m = A.length, p = A[0].length, n = B[0].length;
+    const C = matCreate(m, n);
+    for (let i = 0; i < m; i++)
+      for (let k = 0; k < p; k++) {
+        const a_ik = A[i][k];
+        for (let j = 0; j < n; j++)
+          C[i][j] += a_ik * B[k][j];
+      }
+    return C;
+  }
+
+  /**
+   * Create a diagonal matrix from a vector.
+   * @param {number[]} vec - length n
+   * @returns {number[][]} n×n diagonal matrix
+   */
+  function matDiag(vec) {
+    const n = vec.length;
+    const D = matCreate(n, n);
+    for (let i = 0; i < n; i++) D[i][i] = vec[i];
+    return D;
+  }
+
+  /**
+   * Invert an NxN matrix using Gauss-Jordan elimination with partial pivoting.
+   * Returns null if the matrix is singular (|pivot| < 1e-15).
+   * @param {number[][]} M - n×n matrix (not modified)
+   * @returns {number[][]|null} inverse or null if singular
+   */
+  function matInvertNxN(M) {
+    const n = M.length;
+    // Build augmented matrix [M | I]
+    const aug = matCreate(n, 2 * n);
+    for (let i = 0; i < n; i++) {
+      for (let j = 0; j < n; j++) aug[i][j] = M[i][j];
+      aug[i][n + i] = 1;
+    }
+    // Forward elimination with partial pivoting
+    for (let col = 0; col < n; col++) {
+      // Find pivot row
+      let maxVal = Math.abs(aug[col][col]);
+      let maxRow = col;
+      for (let row = col + 1; row < n; row++) {
+        const v = Math.abs(aug[row][col]);
+        if (v > maxVal) { maxVal = v; maxRow = row; }
+      }
+      if (maxVal < 1e-15) return null; // singular
+      // Swap rows
+      if (maxRow !== col) {
+        const tmp = aug[col]; aug[col] = aug[maxRow]; aug[maxRow] = tmp;
+      }
+      // Scale pivot row
+      const pivotVal = aug[col][col];
+      for (let j = 0; j < 2 * n; j++) aug[col][j] /= pivotVal;
+      // Eliminate column in all other rows
+      for (let row = 0; row < n; row++) {
+        if (row === col) continue;
+        const factor = aug[row][col];
+        for (let j = 0; j < 2 * n; j++) aug[row][j] -= factor * aug[col][j];
+      }
+    }
+    // Extract inverse from right half
+    const inv = matCreate(n, n);
+    for (let i = 0; i < n; i++)
+      for (let j = 0; j < n; j++)
+        inv[i][j] = aug[i][n + j];
+    return inv;
+  }
+
+  /**
+   * Solve Ax = b via matrix inversion.
+   * Returns null if A is singular.
+   * @param {number[][]} A - n×n matrix
+   * @param {number[]} b - length-n vector
+   * @returns {number[]|null} solution vector x, or null if singular
+   */
+  function matSolve(A, b) {
+    const Ainv = matInvertNxN(A);
+    if (!Ainv) return null;
+    const n = b.length;
+    const x = new Array(n);
+    for (let i = 0; i < n; i++) {
+      let sum = 0;
+      for (let j = 0; j < n; j++) sum += Ainv[i][j] * b[j];
+      x[i] = sum;
+    }
+    return x;
+  }
+
+  /**
+   * Weighted Least Squares: fit y = X*beta with weight vector w.
+   * Computes (X'WX)^{-1} X'Wy.
+   * @param {number[][]} X - n×p design matrix
+   * @param {number[]} y - n-length response vector
+   * @param {number[]} w - n-length weight vector (e.g., 1/variance)
+   * @returns {{beta: number[], vcov: number[][], fitted: number[], residuals: number[], sse: number}|null}
+   */
+  function wlsFit(X, y, w) {
+    const n = X.length, p = X[0].length;
+    // Build W diagonal matrix, then X'WX and X'Wy
+    const W = matDiag(w);
+    const Xt = matTranspose(X);
+    const XtW = matMul(Xt, W);        // p×n
+    const XtWX = matMul(XtW, X);      // p×p
+    // Invert X'WX
+    const XtWXinv = matInvertNxN(XtWX);
+    if (!XtWXinv) return null; // singular design
+    // X'Wy as vector
+    const XtWy = new Array(p);
+    for (let i = 0; i < p; i++) {
+      let sum = 0;
+      for (let j = 0; j < n; j++) sum += XtW[i][j] * y[j];
+      XtWy[i] = sum;
+    }
+    // beta = (X'WX)^{-1} X'Wy
+    const beta = new Array(p);
+    for (let i = 0; i < p; i++) {
+      let sum = 0;
+      for (let j = 0; j < p; j++) sum += XtWXinv[i][j] * XtWy[j];
+      beta[i] = sum;
+    }
+    // Fitted values and residuals
+    const fitted = new Array(n);
+    const residuals = new Array(n);
+    let sse = 0;
+    for (let i = 0; i < n; i++) {
+      let yhat = 0;
+      for (let j = 0; j < p; j++) yhat += X[i][j] * beta[j];
+      fitted[i] = yhat;
+      residuals[i] = y[i] - yhat;
+      sse += w[i] * residuals[i] * residuals[i];
+    }
+    return { beta, vcov: XtWXinv, fitted, residuals, sse };
+  }
+
+  /**
+   * Self-test for NxN matrix operations and WLS solver.
+   * Logs results to console. Returns { passed, failed, details }.
+   */
+  function _testMatrixOps() {
+    const results = [];
+    let passed = 0, failed = 0;
+
+    function assert(name, condition, msg) {
+      if (condition) { passed++; results.push({ name, status: 'PASS' }); }
+      else { failed++; results.push({ name, status: 'FAIL', msg }); }
+    }
+    function approxEq(a, b, tol) { return Math.abs(a - b) < (tol ?? 1e-10); }
+
+    // Test 1: 2x2 inverse
+    {
+      const A = [[4, 7], [2, 6]];
+      const Ainv = matInvertNxN(A);
+      // Known inverse: (1/10)*[[6,-7],[-2,4]]
+      assert('2x2 inverse [0][0]', Ainv && approxEq(Ainv[0][0], 0.6), `got ${Ainv && Ainv[0][0]}`);
+      assert('2x2 inverse [0][1]', Ainv && approxEq(Ainv[0][1], -0.7), `got ${Ainv && Ainv[0][1]}`);
+      assert('2x2 inverse [1][0]', Ainv && approxEq(Ainv[1][0], -0.2), `got ${Ainv && Ainv[1][0]}`);
+      assert('2x2 inverse [1][1]', Ainv && approxEq(Ainv[1][1], 0.4), `got ${Ainv && Ainv[1][1]}`);
+    }
+
+    // Test 2: matMul with identity
+    {
+      const A = [[1, 2, 3], [4, 5, 6]];
+      const I3 = [[1,0,0],[0,1,0],[0,0,1]];
+      const AI = matMul(A, I3);
+      let ok = true;
+      for (let i = 0; i < 2; i++)
+        for (let j = 0; j < 3; j++)
+          if (!approxEq(AI[i][j], A[i][j])) ok = false;
+      assert('matMul A*I = A', ok, `A*I != A`);
+    }
+
+    // Test 3: WLS on known linear data y = 2 + 3x (exact, SSE=0)
+    {
+      const xs = [0, 1, 2, 3, 4];
+      const ys = xs.map(x => 2 + 3 * x);          // [2, 5, 8, 11, 14]
+      const ws = xs.map(() => 1);                    // uniform weights
+      const Xmat = xs.map(x => [1, x]);             // design matrix
+      const fit = wlsFit(Xmat, ys, ws);
+      assert('WLS intercept = 2', fit && approxEq(fit.beta[0], 2), `got ${fit && fit.beta[0]}`);
+      assert('WLS slope = 3', fit && approxEq(fit.beta[1], 3), `got ${fit && fit.beta[1]}`);
+      assert('WLS SSE = 0', fit && approxEq(fit.sse, 0, 1e-12), `got ${fit && fit.sse}`);
+    }
+
+    // Test 4: Singular matrix returns null
+    {
+      const S = [[1, 2], [2, 4]]; // rows are linearly dependent
+      const Sinv = matInvertNxN(S);
+      assert('Singular 2x2 returns null', Sinv === null, `got non-null`);
+    }
+
+    // Test 5: 3x3 inverse and round-trip A * A^{-1} = I
+    {
+      const A = [[2, 1, 1], [1, 3, 2], [1, 0, 0]];
+      const Ainv = matInvertNxN(A);
+      const prod = Ainv ? matMul(A, Ainv) : null;
+      let ok = true;
+      if (prod) {
+        for (let i = 0; i < 3; i++)
+          for (let j = 0; j < 3; j++) {
+            const expected = (i === j) ? 1 : 0;
+            if (!approxEq(prod[i][j], expected, 1e-10)) ok = false;
+          }
+      } else { ok = false; }
+      assert('3x3 inverse round-trip A*Ainv=I', ok, 'round-trip failed');
+    }
+
+    // Test 6: matTranspose
+    {
+      const A = [[1, 2, 3], [4, 5, 6]];
+      const T = matTranspose(A);
+      assert('transpose rows', T.length === 3 && T[0].length === 2, `shape ${T.length}x${T[0].length}`);
+      assert('transpose [0][1]=4', approxEq(T[0][1], 4), `got ${T[0][1]}`);
+      assert('transpose [2][0]=3', approxEq(T[2][0], 3), `got ${T[2][0]}`);
+    }
+
+    // Test 7: matDiag
+    {
+      const D = matDiag([2, 5, 7]);
+      assert('matDiag [0][0]=2', approxEq(D[0][0], 2), `got ${D[0][0]}`);
+      assert('matDiag [1][1]=5', approxEq(D[1][1], 5), `got ${D[1][1]}`);
+      assert('matDiag [0][1]=0', approxEq(D[0][1], 0), `got ${D[0][1]}`);
+    }
+
+    // Test 8: WLS with non-uniform weights
+    {
+      const xs = [0, 1, 2, 3];
+      const ys = [1, 3, 5, 7]; // y = 1 + 2x (exact)
+      const ws = [1, 2, 3, 4]; // non-uniform weights
+      const Xmat = xs.map(x => [1, x]);
+      const fit = wlsFit(Xmat, ys, ws);
+      assert('WLS weighted intercept=1', fit && approxEq(fit.beta[0], 1), `got ${fit && fit.beta[0]}`);
+      assert('WLS weighted slope=2', fit && approxEq(fit.beta[1], 2), `got ${fit && fit.beta[1]}`);
+      assert('WLS weighted SSE=0', fit && approxEq(fit.sse, 0, 1e-12), `got ${fit && fit.sse}`);
+    }
+
+    console.log(`_testMatrixOps: ${passed} passed, ${failed} failed`);
+    if (failed > 0) console.warn('FAILURES:', results.filter(r => r.status === 'FAIL'));
+    return { passed, failed, details: results };
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // End NxN Matrix Operations
+  // ═══════════════════════════════════════════════════════════════════════
+
   /**
    * Emax model: y = E0 + Emax * dose / (ED50 + dose)
    * Fit via grid search over ED50, then WLS for E0 and Emax conditionally.
