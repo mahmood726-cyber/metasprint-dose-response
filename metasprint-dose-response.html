@@ -1151,7 +1151,7 @@ body.dark-mode .input-error { background: #451a1a !important; }
           <canvas id="gapScatterCanvas" class="universe-canvas universe-view" aria-label="Gap analysis scatter plot"></canvas>
           <svg id="pipelineSvg" class="network-svg universe-view" viewBox="0 0 900 500"
                role="img" aria-label="Trial phase pipeline"></svg>
-          <div id="universeViewDRLandscape" class="universe-view" style="display:none"></div>
+          <div id="universeViewDRLandscape" class="universe-view"></div>
         </div>
         <div class="network-tooltip" id="networkTooltip"></div>
         <div class="gap-scatter-tooltip" id="gapScatterTooltip"></div>
@@ -13809,7 +13809,8 @@ body.dark-mode .input-error { background: #451a1a !important; }
     const viewMap = {
       alburhan: 'alBurhanCanvas',
       ayat: 'ayatCanvas', network: 'networkSvg', treemap: 'treemapCanvas', timeline: 'timelineCanvas',
-      matrix: 'matrixCanvas', gapscatter: 'gapScatterCanvas', pipeline: 'pipelineSvg'
+      matrix: 'matrixCanvas', gapscatter: 'gapScatterCanvas', pipeline: 'pipelineSvg',
+      drlandscape: 'universeViewDRLandscape'
     };
     const target = document.getElementById(viewMap[viewName]);
     if (target) target.classList.add('active');
