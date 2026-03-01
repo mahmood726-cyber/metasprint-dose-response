@@ -1454,7 +1454,14 @@ body.dark-mode .input-error { background: #451a1a !important; }
           <option value="linear">Linear</option>
           <option value="quadratic">Quadratic</option>
           <option value="emax">Emax</option>
+          <option value="rcs3">RCS (3 knots)</option>
+          <option value="rcs4">RCS (4 knots)</option>
+          <option value="fp1">FP1 (best 1st-degree)</option>
+          <option value="fp2">FP2 (best 2nd-degree)</option>
         </select>
+        <label style="font-size:0.82rem;margin-left:12px;cursor:pointer" title="Fit all studies simultaneously with random effects">
+          <input type="checkbox" id="drOneStageToggle"> One-stage mixed-effects
+        </label>
       </div>
       <div id="analysisWarnings" style="margin-bottom:8px"></div>
       <div class="analysis-summary" id="analysisSummary"></div>
@@ -9897,6 +9904,11 @@ body.dark-mode .input-error { background: #451a1a !important; }
       const rcs = fitRCSDR(points, nk);
       if (rcs) models.push(rcs);
     }
+    // Fractional polynomial models
+    const fp1 = fitFP1DR(points);
+    if (fp1) models.push(fp1);
+    const fp2 = fitFP2DR(points);
+    if (fp2) models.push(fp2);
     if (models.length === 0) return null;
     models.sort((a, b) => a.aic - b.aic);
     return { best: models[0], all: models };
@@ -9928,9 +9940,19 @@ body.dark-mode .input-error { background: #451a1a !important; }
     if (userChoice === 'auto') {
       best = comparison.best;
     } else {
-      const modelMap = { linear: 'Linear', quadratic: 'Quadratic', emax: 'Emax' };
-      const forcedName = modelMap[userChoice] || 'Linear';
-      best = comparison.all.find(m => m.model === forcedName) ?? comparison.best;
+      const modelMap = {
+        linear: 'Linear', quadratic: 'Quadratic', emax: 'Emax',
+        rcs3: 'RCS-3', rcs4: 'RCS-4',
+        fp1: null, fp2: null // FP models have dynamic names like FP1(0.5)
+      };
+      if (userChoice === 'fp1') {
+        best = comparison.all.find(m => m.model?.startsWith('FP1')) ?? comparison.best;
+      } else if (userChoice === 'fp2') {
+        best = comparison.all.find(m => m.model?.startsWith('FP2')) ?? comparison.best;
+      } else {
+        const forcedName = modelMap[userChoice] ?? 'Linear';
+        best = comparison.all.find(m => m.model === forcedName) ?? comparison.best;
+      }
     }
     // Generate curve SVG
     const svgHtml = renderDoseResponseCurveSVG(data.points, best, confLevel, zCrit, data.isRatio);
@@ -9942,6 +9964,7 @@ body.dark-mode .input-error { background: #451a1a !important; }
       '<th style="padding:6px 10px;text-align:right" title="Lower is better (relative scale)">AIC</th>' +
       '<th style="padding:6px 10px;text-align:right" title="Lower is better (relative scale)">BIC</th>' +
       '<th style="padding:6px 10px;text-align:right">R\u00B2</th>' +
+      '<th style="padding:6px 10px;text-align:right" title="p-value for non-linearity test">Non-lin. p</th>' +
       '<th style="padding:6px 10px;text-align:left">Parameters</th>' +
       '</tr></thead><tbody>';
     for (const m of comparison.all) {
@@ -9951,11 +9974,15 @@ body.dark-mode .input-error { background: #451a1a !important; }
       if (m.model === 'Linear') params = '\u03B2\u2081=' + m.b1.toFixed(4);
       else if (m.model === 'Quadratic') params = '\u03B2\u2081=' + m.b1.toFixed(4) + ', \u03B2\u2082=' + m.b2.toFixed(6);
       else if (m.model === 'Emax') params = 'E<sub>max</sub>=' + m.Emax.toFixed(3) + ', ED<sub>50</sub>=' + m.ED50.toFixed(1);
+      const pNL = (m.pNonlinear != null && isFinite(m.pNonlinear)) ? m.pNonlinear.toFixed(4)
+                : (m.pFP2vsFP1 != null && isFinite(m.pFP2vsFP1)) ? m.pFP2vsFP1.toFixed(4)
+                : '\u2014'; // em-dash
       tableHtml += '<tr style="border-bottom:1px solid var(--border);' + bg + '">' +
         '<td style="padding:5px 10px">' + m.model + (isBest ? ' \u2713' : '') + '</td>' +
         '<td style="padding:5px 10px;text-align:right">' + m.aic.toFixed(1) + '</td>' +
         '<td style="padding:5px 10px;text-align:right">' + m.bic.toFixed(1) + '</td>' +
         '<td style="padding:5px 10px;text-align:right">' + (m.R2 * 100).toFixed(1) + '%</td>' +
+        '<td style="padding:5px 10px;text-align:right">' + pNL + '</td>' +
         '<td style="padding:5px 10px">' + params + '</td></tr>';
     }
     tableHtml += '</tbody></table>';
