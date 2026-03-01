@@ -414,5 +414,49 @@ class TestDRUniverse:
         assert result['hasDRCount'] is True
 
 
+class TestCSVImport:
+    """Test CSV import helper functions."""
+
+    def test_csv_parse_line(self, driver):
+        result = driver.execute_script("""
+            var line1 = parseCSVLine('StudyA,10,mg,100,1.5,0.8,2.2,0.3,MD', ',');
+            var line2 = parseCSVLine('"Study, B",20,mg,150,2.0,1.0,3.0,0.4,MD', ',');
+            var line3 = parseCSVLine('a\\tb\\tc', '\\t');
+            return {
+                line1Len: line1.length, line1First: line1[0],
+                line2First: line2[0],
+                line3Len: line3.length
+            };
+        """)
+        assert result is not None
+        assert result['line1Len'] == 9
+        assert result['line1First'] == 'StudyA'
+        assert result['line2First'] == 'Study, B'
+        assert result['line3Len'] == 3
+
+    def test_parse_float_safe(self, driver):
+        result = driver.execute_script("""
+            return {
+                normal: parseFloatSafe('3.14'),
+                zero: parseFloatSafe('0'),
+                negZero: parseFloatSafe('-0.5'),
+                empty: parseFloatSafe(''),
+                nul: parseFloatSafe(null),
+                abc: parseFloatSafe('abc')
+            };
+        """)
+        assert result is not None
+        assert result['normal'] == 3.14
+        assert result['zero'] == 0  # Must not drop valid zero
+        assert result['negZero'] == -0.5
+        assert result['empty'] is None
+        assert result['nul'] is None
+        assert result['abc'] is None
+
+    def test_csv_import_button_exists(self, driver):
+        btns = driver.find_elements(By.ID, 'csvImportInput')
+        assert len(btns) == 1
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

@@ -1366,6 +1366,8 @@ body.dark-mode .input-error { background: #451a1a !important; }
         <button class="btn-outline btn-sm" onclick="redo()" title="Redo (Ctrl+Y)">Redo</button>
         <button onclick="autoPopulateFromIncluded()">Import from Screening</button>
         <button class="btn-outline" onclick="exportDoseResponseCSV()">Export Dose-Response CSV</button>
+        <button class="btn-outline" onclick="document.getElementById('csvImportInput').click()">Import CSV</button>
+        <input type="file" id="csvImportInput" accept=".csv,.tsv,.txt" style="display:none" onchange="importDoseResponseCSV(this)" aria-label="Import dose-response CSV file">
         <button class="btn-outline" onclick="exportStudiesCSV()">Export CSV</button>
         <button class="btn-info" onclick="showExtractorModal()">Extract from PDF</button>
       </div>
@@ -4399,7 +4401,8 @@ body.dark-mode .input-error { background: #451a1a !important; }
     return parsed;
   }
 
-  function parseCSVLine(line) {
+  function parseCSVLine(line, delim) {
+    if (!delim) delim = ',';
     const result = [];
     let current = '';
     let inQuotes = false;
@@ -4408,7 +4411,7 @@ body.dark-mode .input-error { background: #451a1a !important; }
       if (ch === '"') {
         if (inQuotes && line[i + 1] === '"') { current += '"'; i++; }
         else { inQuotes = !inQuotes; }
-      } else if (ch === ',' && !inQuotes) { result.push(current.trim()); current = ''; }
+      } else if (ch === delim && !inQuotes) { result.push(current.trim()); current = ''; }
       else { current += ch; }
     }
     result.push(current.trim());
@@ -7217,6 +7220,159 @@ body.dark-mode .input-error { background: #451a1a !important; }
       return base.join(',');
     });
     downloadFile(header + '\n' + rows.join('\n'), 'dose-response-studies-export.csv', 'text/csv');
+  }
+
+  /**
+   * Import dose-response data from CSV file into extractedStudies.
+   * Flexible column mapping: accepts full export format or minimal (Study, Dose, Effect).
+   * @param {HTMLInputElement} input - file input element
+   */
+  function importDoseResponseCSV(input) {
+    if (!input.files || !input.files[0]) return;
+    var file = input.files[0];
+    var reader = new FileReader();
+    reader.onload = function(e) {
+      var text = e.target.result;
+      var lines = text.split(/\r?\n/).filter(function(l) { return l.trim().length > 0; });
+      if (lines.length < 2) {
+        showToast('CSV must have a header row and at least one data row', 'warning');
+        input.value = '';
+        return;
+      }
+
+      // Detect delimiter (tab or comma)
+      var delim = lines[0].includes('\t') ? '\t' : ',';
+      var header = parseCSVLine(lines[0], delim).map(function(h) {
+        return h.trim().toLowerCase().replace(/[\s_-]+/g, '');
+      });
+
+      // Flexible column name mapping
+      var fieldAliases = {
+        studyid: 'authorYear', study: 'authorYear', author: 'authorYear', studyname: 'authorYear',
+        trialid: 'trialId', trial: 'trialId',
+        nctid: 'nctId', nct: 'nctId',
+        pmid: 'pmid',
+        doi: 'doi',
+        outcome: 'outcomeId',
+        timepoint: 'timepoint',
+        population: 'analysisPopulation',
+        dose: 'dose',
+        doseunit: 'doseUnit', unit: 'doseUnit',
+        referencedose: 'referenceDose', refdose: 'referenceDose',
+        n: 'nTotal', samplesize: 'nTotal', ntotal: 'nTotal',
+        effect: 'effectEstimate', estimate: 'effectEstimate', effectestimate: 'effectEstimate',
+        lowerci: 'lowerCI', lower: 'lowerCI', cilo: 'lowerCI', lo: 'lowerCI', cilower: 'lowerCI',
+        upperci: 'upperCI', upper: 'upperCI', cihi: 'upperCI', hi: 'upperCI', ciupper: 'upperCI',
+        se: 'se', stderr: 'se', standarderror: 'se',
+        type: 'effectType', effecttype: 'effectType',
+        subgroup: 'subgroup',
+        notes: 'notes',
+        slope: 'slope',
+        slopese: 'slopeSE',
+        doserange: 'doseRange',
+        kdoses: 'kDoses',
+        mean: 'mean',
+        sd: 'sd'
+      };
+
+      var colMap = {};
+      for (var c = 0; c < header.length; c++) {
+        if (fieldAliases[header[c]]) {
+          colMap[fieldAliases[header[c]]] = c;
+        }
+      }
+
+      // Must have at minimum: Study + Dose + (Effect or Slope or Mean)
+      if (colMap.authorYear == null || colMap.dose == null ||
+          (colMap.effectEstimate == null && colMap.slope == null && colMap.mean == null)) {
+        showToast('CSV must have at least: Study, Dose, and Effect (or Slope, or Mean) columns', 'warning');
+        input.value = '';
+        return;
+      }
+
+      // Auto-detect input mode
+      if (colMap.slope != null && colMap.slopeSE != null) {
+        setInputMode('2x2');
+      } else if (colMap.mean != null && colMap.sd != null) {
+        setInputMode('continuous');
+      } else {
+        setInputMode('effect');
+      }
+
+      // Parse data rows
+      var imported = [];
+      for (var r = 1; r < lines.length; r++) {
+        var vals = parseCSVLine(lines[r], delim);
+        if (vals.length < 3) continue;
+
+        var row = {
+          id: 'imp_' + Date.now() + '_' + r,
+          projectId: currentProjectId,
+          authorYear: getCSVVal(vals, colMap.authorYear, ''),
+          trialId: getCSVVal(vals, colMap.trialId, ''),
+          nctId: getCSVVal(vals, colMap.nctId, ''),
+          pmid: getCSVVal(vals, colMap.pmid, ''),
+          doi: getCSVVal(vals, colMap.doi, ''),
+          outcomeId: getCSVVal(vals, colMap.outcomeId, ''),
+          timepoint: getCSVVal(vals, colMap.timepoint, ''),
+          analysisPopulation: getCSVVal(vals, colMap.analysisPopulation, ''),
+          dose: parseFloatSafe(getCSVVal(vals, colMap.dose, '')),
+          doseUnit: getCSVVal(vals, colMap.doseUnit, ''),
+          referenceDose: parseFloatSafe(getCSVVal(vals, colMap.referenceDose, '')),
+          nTotal: parseIntSafe(getCSVVal(vals, colMap.nTotal, '')),
+          effectEstimate: parseFloatSafe(getCSVVal(vals, colMap.effectEstimate, '')),
+          lowerCI: parseFloatSafe(getCSVVal(vals, colMap.lowerCI, '')),
+          upperCI: parseFloatSafe(getCSVVal(vals, colMap.upperCI, '')),
+          se: parseFloatSafe(getCSVVal(vals, colMap.se, '')),
+          effectType: getCSVVal(vals, colMap.effectType, 'MD'),
+          subgroup: getCSVVal(vals, colMap.subgroup, ''),
+          notes: getCSVVal(vals, colMap.notes, ''),
+          slope: parseFloatSafe(getCSVVal(vals, colMap.slope, '')),
+          slopeSE: parseFloatSafe(getCSVVal(vals, colMap.slopeSE, '')),
+          doseRange: getCSVVal(vals, colMap.doseRange, ''),
+          kDoses: parseIntSafe(getCSVVal(vals, colMap.kDoses, '')),
+          mean: parseFloatSafe(getCSVVal(vals, colMap.mean, '')),
+          sd: parseFloatSafe(getCSVVal(vals, colMap.sd, '')),
+          verificationStatus: 'imported'
+        };
+
+        imported.push(row);
+      }
+
+      if (imported.length === 0) {
+        showToast('No valid data rows found in CSV', 'warning');
+        input.value = '';
+        return;
+      }
+
+      // Append to existing studies and persist
+      for (var i = 0; i < imported.length; i++) {
+        extractedStudies.push(imported[i]);
+        saveStudy(imported[i]);
+      }
+      renderExtractTable();
+      showToast('Imported ' + imported.length + ' rows from CSV', 'success');
+      input.value = '';
+    };
+    reader.readAsText(file);
+  }
+
+  function getCSVVal(vals, idx, fallback) {
+    if (idx == null || idx >= vals.length) return fallback;
+    var v = vals[idx].trim().replace(/^"+|"+$/g, '');
+    return v || fallback;
+  }
+
+  function parseFloatSafe(s) {
+    if (s == null || s === '') return null;
+    var v = parseFloat(s);
+    return isFinite(v) ? v : null;
+  }
+
+  function parseIntSafe(s) {
+    if (s == null || s === '') return null;
+    var v = parseInt(s, 10);
+    return isFinite(v) ? v : null;
   }
 
   // ============================================================
