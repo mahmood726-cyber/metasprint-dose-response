@@ -8878,6 +8878,343 @@ body.dark-mode .input-error { background: #451a1a !important; }
     return ssr;
   }
 
+  // ── Fractional Polynomial dose-response models (FP1, FP2) ──────────
+  const FP_POWERS = [-2, -1, -0.5, 0, 0.5, 1, 2, 3];
+
+  /**
+   * Transform dose by fractional polynomial power.
+   * p === 0 → log(dose); otherwise dose^p.
+   * Doses <= 0 are clamped to 1e-6 for safety.
+   */
+  function fpTransform(dose, p) {
+    const d = dose <= 0 ? 1e-6 : dose;
+    if (p === 0) return Math.log(d);
+    return Math.pow(d, p);
+  }
+
+  /**
+   * First-degree fractional polynomial: y = b0 + b1 * dose^p
+   * Searches FP_POWERS for the power that minimises AIC.
+   * Requires >= 3 points.
+   */
+  function fitFP1DR(points) {
+    if (points.length < 3) return null;
+    const n = points.length;
+    const y = points.map(p => p.effect);
+    const w = points.map(p => 1 / (p.se * p.se));
+
+    let bestAIC = Infinity, bestFit = null, bestPow = null, bestSSE = Infinity;
+
+    for (const pw of FP_POWERS) {
+      // Build design matrix X = [1, dose^pw]
+      const X = points.map(p => {
+        const d = p.dose <= 0 ? 1e-6 : p.dose;
+        return [1, fpTransform(d, pw)];
+      });
+      const fit = wlsFit(X, y, w);
+      if (!fit) continue;
+      const aic = n * Math.log(fit.sse / n + 1e-15) + 2 * 2;
+      if (aic < bestAIC) {
+        bestAIC = aic;
+        bestFit = fit;
+        bestPow = pw;
+        bestSSE = fit.sse;
+      }
+    }
+    if (!bestFit) return null;
+
+    const k = 2; // b0, b1
+    const bic = n * Math.log(bestSSE / n + 1e-15) + k * Math.log(n);
+
+    // Weighted R-squared
+    const wBar = w.reduce((a, b) => a + b, 0);
+    const yBarW = y.reduce((s, yi, i) => s + w[i] * yi, 0) / wBar;
+    let ssTot = 0;
+    for (let i = 0; i < n; i++) ssTot += w[i] * (y[i] - yBarW) * (y[i] - yBarW);
+    const R2 = ssTot > 0 ? 1 - bestSSE / ssTot : 0;
+
+    // SEs from vcov diagonal
+    const se_b0 = Math.sqrt(Math.max(0, bestFit.vcov[0][0]));
+    const se_b1 = Math.sqrt(Math.max(0, bestFit.vcov[1][1]));
+
+    const b0 = bestFit.beta[0];
+    const b1 = bestFit.beta[1];
+    const powerLabel = bestPow === 0 ? 'log' : bestPow.toString();
+
+    return {
+      model: 'FP1(' + powerLabel + ')',
+      b0, b1, power: bestPow,
+      se_b0, se_b1,
+      R2, aic: bestAIC, bic,
+      fitted: bestFit.fitted,
+      residuals: bestFit.residuals,
+      nParams: 2,
+      vcov: bestFit.vcov,
+      sse: bestSSE,
+      predict: function(dose) {
+        const d = dose <= 0 ? 1e-6 : dose;
+        return b0 + b1 * fpTransform(d, bestPow);
+      },
+      predictCI: function(dose, zCrit) {
+        const d = dose <= 0 ? 1e-6 : dose;
+        const t = fpTransform(d, bestPow);
+        const yh = b0 + b1 * t;
+        const xVec = [1, t];
+        // Variance = x' * vcov * x
+        let varY = 0;
+        for (let i = 0; i < 2; i++)
+          for (let j = 0; j < 2; j++)
+            varY += xVec[i] * bestFit.vcov[i][j] * xVec[j];
+        const seh = Math.sqrt(Math.max(0, varY));
+        return { y: yh, lo: yh - zCrit * seh, hi: yh + zCrit * seh };
+      },
+      paramStr: 'b0=' + b0.toFixed(4) + ', b1=' + b1.toFixed(4) + ', p=' + powerLabel
+    };
+  }
+
+  /**
+   * Second-degree fractional polynomial: y = b0 + b1*dose^p1 + b2*dose^p2
+   * When p1 === p2 (repeated power): y = b0 + b1*dose^p + b2*dose^p*log(dose)
+   * Searches all non-redundant pairs from FP_POWERS for lowest AIC.
+   * Requires >= 4 points.
+   */
+  function fitFP2DR(points) {
+    if (points.length < 4) return null;
+    const n = points.length;
+    const y = points.map(p => p.effect);
+    const w = points.map(p => 1 / (p.se * p.se));
+
+    let bestAIC = Infinity, bestFit = null, bestP1 = null, bestP2 = null, bestSSE = Infinity;
+
+    for (let i1 = 0; i1 < FP_POWERS.length; i1++) {
+      for (let i2 = i1; i2 < FP_POWERS.length; i2++) {
+        const p1 = FP_POWERS[i1], p2 = FP_POWERS[i2];
+        const repeated = (p1 === p2);
+
+        // Build design matrix X = [1, t1, t2]
+        const X = points.map(pt => {
+          const d = pt.dose <= 0 ? 1e-6 : pt.dose;
+          const t1 = fpTransform(d, p1);
+          let t2;
+          if (repeated) {
+            // Repeated power: second term = dose^p * log(dose)
+            t2 = fpTransform(d, p1) * Math.log(d);
+          } else {
+            t2 = fpTransform(d, p2);
+          }
+          return [1, t1, t2];
+        });
+
+        const fit = wlsFit(X, y, w);
+        if (!fit) continue;
+        const aic = n * Math.log(fit.sse / n + 1e-15) + 2 * 3;
+        if (aic < bestAIC) {
+          bestAIC = aic;
+          bestFit = fit;
+          bestP1 = p1;
+          bestP2 = p2;
+          bestSSE = fit.sse;
+        }
+      }
+    }
+    if (!bestFit) return null;
+
+    const k = 3; // b0, b1, b2
+    const bic = n * Math.log(bestSSE / n + 1e-15) + k * Math.log(n);
+
+    // Weighted R-squared
+    const wBar = w.reduce((a, b) => a + b, 0);
+    const yBarW = y.reduce((s, yi, i) => s + w[i] * yi, 0) / wBar;
+    let ssTot = 0;
+    for (let i = 0; i < n; i++) ssTot += w[i] * (y[i] - yBarW) * (y[i] - yBarW);
+    const R2 = ssTot > 0 ? 1 - bestSSE / ssTot : 0;
+
+    // SEs from vcov diagonal
+    const se_b0 = Math.sqrt(Math.max(0, bestFit.vcov[0][0]));
+    const se_b1 = Math.sqrt(Math.max(0, bestFit.vcov[1][1]));
+    const se_b2 = Math.sqrt(Math.max(0, bestFit.vcov[2][2]));
+
+    const b0 = bestFit.beta[0];
+    const b1 = bestFit.beta[1];
+    const b2 = bestFit.beta[2];
+    const repeated = (bestP1 === bestP2);
+
+    const label1 = bestP1 === 0 ? 'log' : bestP1.toString();
+    const label2 = bestP2 === 0 ? 'log' : bestP2.toString();
+
+    // Deviance test: FP2 vs FP1 (likelihood ratio on 1 df)
+    let pFP2vsFP1 = null;
+    const fp1 = fitFP1DR(points);
+    if (fp1 && fp1.sse > 0 && bestSSE > 0) {
+      const deviance = n * (Math.log(fp1.sse / n) - Math.log(bestSSE / n));
+      if (isFinite(deviance) && deviance > 0) {
+        pFP2vsFP1 = 1 - chi2CDF(deviance, 1);
+      }
+    }
+
+    return {
+      model: 'FP2(' + label1 + ',' + label2 + ')',
+      b0, b1, b2,
+      power1: bestP1, power2: bestP2,
+      pFP2vsFP1,
+      R2, aic: bestAIC, bic,
+      fitted: bestFit.fitted,
+      residuals: bestFit.residuals,
+      nParams: 3,
+      vcov: bestFit.vcov,
+      sse: bestSSE,
+      predict: function(dose) {
+        const d = dose <= 0 ? 1e-6 : dose;
+        const t1 = fpTransform(d, bestP1);
+        let t2;
+        if (repeated) {
+          t2 = fpTransform(d, bestP1) * Math.log(d);
+        } else {
+          t2 = fpTransform(d, bestP2);
+        }
+        return b0 + b1 * t1 + b2 * t2;
+      },
+      predictCI: function(dose, zCrit) {
+        const d = dose <= 0 ? 1e-6 : dose;
+        const t1 = fpTransform(d, bestP1);
+        let t2;
+        if (repeated) {
+          t2 = fpTransform(d, bestP1) * Math.log(d);
+        } else {
+          t2 = fpTransform(d, bestP2);
+        }
+        const yh = b0 + b1 * t1 + b2 * t2;
+        const xVec = [1, t1, t2];
+        // Variance = x' * vcov * x
+        let varY = 0;
+        for (let ii = 0; ii < 3; ii++)
+          for (let jj = 0; jj < 3; jj++)
+            varY += xVec[ii] * bestFit.vcov[ii][jj] * xVec[jj];
+        const seh = Math.sqrt(Math.max(0, varY));
+        return { y: yh, lo: yh - zCrit * seh, hi: yh + zCrit * seh };
+      },
+      paramStr: 'b0=' + b0.toFixed(4) + ', b1=' + b1.toFixed(4) + ', b2=' + b2.toFixed(4) +
+                ', p1=' + label1 + ', p2=' + label2
+    };
+  }
+
+  /**
+   * Self-test for fractional polynomial models.
+   */
+  function _testFP() {
+    const results = [];
+    let passed = 0, failed = 0;
+
+    function assert(name, condition, msg) {
+      if (condition) { passed++; results.push({ name, status: 'PASS' }); }
+      else { failed++; results.push({ name, status: 'FAIL', msg }); }
+    }
+    function approxEq(a, b, tol) { return Math.abs(a - b) < (tol ?? 1e-6); }
+
+    // Test 1: FP1 on y = 2 + 3*sqrt(dose) — should pick power=0.5, R² > 0.99
+    {
+      const pts = [];
+      for (let i = 0; i < 8; i++) {
+        const dose = (i + 1) * 5; // 5, 10, ..., 40
+        const effect = 2 + 3 * Math.sqrt(dose);
+        pts.push({ dose, effect, se: 0.1 });
+      }
+      const fp1 = fitFP1DR(pts);
+      assert('FP1 not null', fp1 !== null, 'FP1 returned null');
+      if (fp1) {
+        assert('FP1 picks power=0.5', fp1.power === 0.5,
+          'Expected power=0.5, got ' + fp1.power);
+        assert('FP1 R2 > 0.99', fp1.R2 > 0.99,
+          'R2=' + fp1.R2);
+        assert('FP1 b0 approx 2', approxEq(fp1.b0, 2, 0.01),
+          'b0=' + fp1.b0);
+        assert('FP1 b1 approx 3', approxEq(fp1.b1, 3, 0.01),
+          'b1=' + fp1.b1);
+        assert('FP1 model label', fp1.model === 'FP1(0.5)',
+          'model=' + fp1.model);
+        // predict at dose=25 -> 2 + 3*5 = 17
+        assert('FP1 predict(25) approx 17', approxEq(fp1.predict(25), 17, 0.01),
+          'predict(25)=' + fp1.predict(25));
+        // predictCI returns object with y, lo, hi
+        const ci = fp1.predictCI(25, 1.96);
+        assert('FP1 predictCI has y', ci && approxEq(ci.y, 17, 0.01),
+          'ci.y=' + (ci && ci.y));
+        assert('FP1 predictCI lo < hi', ci && ci.lo < ci.hi,
+          'lo=' + (ci && ci.lo) + ' hi=' + (ci && ci.hi));
+      }
+    }
+
+    // Test 2: FP2 on the same data — should also fit well, AIC close to FP1
+    {
+      const pts = [];
+      for (let i = 0; i < 8; i++) {
+        const dose = (i + 1) * 5;
+        const effect = 2 + 3 * Math.sqrt(dose);
+        pts.push({ dose, effect, se: 0.1 });
+      }
+      const fp2 = fitFP2DR(pts);
+      assert('FP2 not null', fp2 !== null, 'FP2 returned null');
+      if (fp2) {
+        assert('FP2 R2 > 0.99', fp2.R2 > 0.99, 'R2=' + fp2.R2);
+        assert('FP2 has pFP2vsFP1', fp2.pFP2vsFP1 !== undefined, 'missing pFP2vsFP1');
+        assert('FP2 nParams === 3', fp2.nParams === 3, 'nParams=' + fp2.nParams);
+        // predict at dose=25
+        const pred = fp2.predict(25);
+        assert('FP2 predict(25) approx 17', approxEq(pred, 17, 0.5),
+          'predict(25)=' + pred);
+      }
+    }
+
+    // Test 3: Too few points
+    {
+      const pts2 = [{ dose: 1, effect: 1, se: 0.1 }, { dose: 2, effect: 2, se: 0.1 }];
+      const fp1_2 = fitFP1DR(pts2);
+      assert('FP1 null if <3 points', fp1_2 === null, 'Expected null');
+
+      const pts3 = [{ dose: 1, effect: 1, se: 0.1 }, { dose: 2, effect: 2, se: 0.1 },
+                    { dose: 3, effect: 3, se: 0.1 }];
+      const fp2_3 = fitFP2DR(pts3);
+      assert('FP2 null if <4 points', fp2_3 === null, 'Expected null');
+    }
+
+    // Test 4: fpTransform edge cases
+    {
+      assert('fpTransform p=0 -> log', approxEq(fpTransform(Math.E, 0), 1, 1e-10),
+        'fpTransform(e, 0)=' + fpTransform(Math.E, 0));
+      assert('fpTransform p=1 -> identity', approxEq(fpTransform(5, 1), 5, 1e-10),
+        'fpTransform(5, 1)=' + fpTransform(5, 1));
+      assert('fpTransform p=-1 -> 1/dose', approxEq(fpTransform(4, -1), 0.25, 1e-10),
+        'fpTransform(4, -1)=' + fpTransform(4, -1));
+      assert('fpTransform p=2 -> dose^2', approxEq(fpTransform(3, 2), 9, 1e-10),
+        'fpTransform(3, 2)=' + fpTransform(3, 2));
+      // Dose <= 0 clamped
+      const tNeg = fpTransform(-5, 0.5);
+      assert('fpTransform dose<=0 clamped', isFinite(tNeg), 'got ' + tNeg);
+    }
+
+    // Test 5: FP1 power=0 (log) label
+    {
+      // Data on y = 1 + 2*log(dose)
+      const pts = [];
+      for (let i = 1; i <= 6; i++) {
+        const dose = i * 10;
+        pts.push({ dose, effect: 1 + 2 * Math.log(dose), se: 0.1 });
+      }
+      const fp1 = fitFP1DR(pts);
+      if (fp1 && fp1.power === 0) {
+        assert('FP1 log label', fp1.model === 'FP1(log)', 'model=' + fp1.model);
+      } else {
+        // Still pass if it chose a close power that fits well
+        assert('FP1 log data R2 > 0.99', fp1 && fp1.R2 > 0.99,
+          'R2=' + (fp1 && fp1.R2) + ' power=' + (fp1 && fp1.power));
+      }
+    }
+
+    console.log('[_testFP] ' + passed + ' passed, ' + failed + ' failed');
+    if (failed > 0) console.warn('[_testFP] FAILURES:', results.filter(r => r.status === 'FAIL'));
+    return { passed, failed, details: results };
+  }
+
   /**
    * Compare dose-response models and select the best by AIC.
    */
