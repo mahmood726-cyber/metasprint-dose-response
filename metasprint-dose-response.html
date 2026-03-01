@@ -9915,6 +9915,51 @@ body.dark-mode .input-error { background: #451a1a !important; }
   }
 
   /**
+   * Build an HTML table comparing dose-response models.
+   * @param {Array} models - array of model objects (each must have .model, .aic, .bic, .R2; optional .b1, .b2, .Emax, .ED50, .paramStr, .pNonlinear, .pFP2vsFP1)
+   * @param {string} highlightModelName - name of the model to highlight (checkmark + blue bg)
+   * @returns {string} HTML table string
+   */
+  function renderModelComparisonTable(models, highlightModelName) {
+    let html = '<h3 style="font-size:0.95rem;margin:16px 0 8px">Dose-Response Model Comparison</h3>';
+    html += '<table style="font-size:0.82rem;border-collapse:collapse;width:100%;max-width:700px">';
+    html += '<thead><tr style="border-bottom:2px solid var(--border)">' +
+      '<th style="padding:6px 10px;text-align:left">Model</th>' +
+      '<th style="padding:6px 10px;text-align:right" title="Lower is better (relative scale)">AIC</th>' +
+      '<th style="padding:6px 10px;text-align:right" title="Lower is better (relative scale)">BIC</th>' +
+      '<th style="padding:6px 10px;text-align:right">R\u00B2</th>' +
+      '<th style="padding:6px 10px;text-align:right" title="p-value for non-linearity test">Non-lin. p</th>' +
+      '<th style="padding:6px 10px;text-align:left">Parameters</th>' +
+      '</tr></thead><tbody>';
+    for (const m of models) {
+      const isBest = m.model === highlightModelName;
+      const bg = isBest ? 'background:rgba(37,99,235,0.08);font-weight:600' : '';
+      let params = '';
+      if (m.paramStr) {
+        params = m.paramStr;
+      } else if (m.model === 'Linear') {
+        params = '\u03B2\u2081=' + m.b1.toFixed(4);
+      } else if (m.model === 'Quadratic') {
+        params = '\u03B2\u2081=' + m.b1.toFixed(4) + ', \u03B2\u2082=' + m.b2.toFixed(6);
+      } else if (m.model === 'Emax') {
+        params = 'E<sub>max</sub>=' + m.Emax.toFixed(3) + ', ED<sub>50</sub>=' + m.ED50.toFixed(1);
+      }
+      const pNL = (m.pNonlinear != null && isFinite(m.pNonlinear)) ? m.pNonlinear.toFixed(4)
+                : (m.pFP2vsFP1 != null && isFinite(m.pFP2vsFP1)) ? m.pFP2vsFP1.toFixed(4)
+                : '\u2014'; // em-dash
+      html += '<tr style="border-bottom:1px solid var(--border);' + bg + '">' +
+        '<td style="padding:5px 10px">' + m.model + (isBest ? ' \u2713' : '') + '</td>' +
+        '<td style="padding:5px 10px;text-align:right">' + m.aic.toFixed(1) + '</td>' +
+        '<td style="padding:5px 10px;text-align:right">' + m.bic.toFixed(1) + '</td>' +
+        '<td style="padding:5px 10px;text-align:right">' + (m.R2 * 100).toFixed(1) + '%</td>' +
+        '<td style="padding:5px 10px;text-align:right">' + pNL + '</td>' +
+        '<td style="padding:5px 10px">' + params + '</td></tr>';
+    }
+    html += '</tbody></table>';
+    return html;
+  }
+
+  /**
    * Render dose-response analysis: curve plot + model comparison table.
    */
   function renderDoseResponseAnalysis(studies, confLevel) {
@@ -9930,6 +9975,73 @@ body.dark-mode .input-error { background: #451a1a !important; }
       el.innerHTML = '<p style="font-size:0.85rem;color:var(--text-muted)">Need at least 3 dose-effect data points for dose-response curve fitting.</p>';
       return;
     }
+
+    // Check one-stage toggle
+    const useOneStage = document.getElementById('drOneStageToggle')?.checked ?? false;
+
+    if (useOneStage && data.mode === 'one-stage' && data.points.length > 0) {
+      // Group points by study for one-stage fitting
+      const byStudy = {};
+      for (const pt of data.points) {
+        const sid = pt.studyId ?? 'unknown';
+        if (!byStudy[sid]) byStudy[sid] = { studyId: sid, points: [] };
+        byStudy[sid].points.push(pt);
+      }
+      const studyGroups = Object.values(byStudy);
+
+      if (studyGroups.length >= 2) {
+        // Determine model type from dropdown
+        const drModelSel = document.getElementById('drModelSelect');
+        const userChoice = drModelSel ? drModelSel.value : 'auto';
+        // Map to one-stage model type (only linear and quadratic supported for one-stage)
+        const modelType = (userChoice === 'quadratic') ? 'quadratic' : 'linear';
+
+        const zCrit = normalQuantile(1 - (1 - confLevel) / 2);
+        const oneStageResult = fitOneStageMixedEffects(studyGroups, modelType);
+
+        if (oneStageResult) {
+          // Render dose-response curve with study overlays
+          const svgHtml = renderDoseResponseCurveSVG(data.points, oneStageResult, confLevel, zCrit, data.isRatio);
+
+          // Show convergence info
+          const convHtml = oneStageResult.convergence.converged
+            ? '<span style="color:var(--success)">Converged in ' + oneStageResult.convergence.iterations + ' iterations</span>'
+            : '<span style="color:var(--warning)">Did not converge (' + oneStageResult.convergence.iterations + ' iterations)</span>';
+
+          // Show variance components
+          const vcHtml = '<p style="font-size:0.82rem;color:var(--text-muted);margin-top:4px">' +
+            'Random intercept \u03C4\u00B2 = ' + oneStageResult.tau2_intercept.toFixed(4) +
+            ', Random slope \u03C4\u00B2 = ' + oneStageResult.tau2_slope.toFixed(4) +
+            ' | ' + oneStageResult.nStudies + ' studies, ' + oneStageResult.nPoints + ' points</p>';
+
+          // Also run standard model comparison for the table
+          const comparison = compareDoseResponseModels(data.points);
+          let tableHtml = '';
+          if (comparison) {
+            // Add one-stage result to comparison
+            const allModels = [...comparison.all];
+            allModels.push({
+              model: oneStageResult.model,
+              aic: oneStageResult.aic,
+              bic: oneStageResult.bic,
+              R2: oneStageResult.R2,
+              paramStr: oneStageResult.paramStr
+            });
+            allModels.sort((a, b) => a.aic - b.aic);
+            // Render comparison table highlighting the one-stage model
+            tableHtml = renderModelComparisonTable(allModels, oneStageResult.model);
+          }
+
+          el.innerHTML = '<h3 style="font-size:0.95rem;margin-bottom:8px">Dose-Response Curve (One-Stage Mixed-Effects)</h3>' +
+            svgHtml +
+            '<p style="font-size:0.82rem;margin-top:8px">' + convHtml + '</p>' + vcHtml;
+          if (tableHtml) el.innerHTML += tableHtml;
+          return;
+        }
+      }
+      // Fall through to standard analysis if one-stage fails
+    }
+
     const comparison = compareDoseResponseModels(data.points);
     if (!comparison) { el.innerHTML = ''; return; }
     const zCrit = normalQuantile(1 - (1 - confLevel) / 2);
@@ -9956,36 +10068,8 @@ body.dark-mode .input-error { background: #451a1a !important; }
     }
     // Generate curve SVG
     const svgHtml = renderDoseResponseCurveSVG(data.points, best, confLevel, zCrit, data.isRatio);
-    // Model comparison table
-    let tableHtml = '<h3 style="font-size:0.95rem;margin:16px 0 8px">Dose-Response Model Comparison</h3>';
-    tableHtml += '<table style="font-size:0.82rem;border-collapse:collapse;width:100%;max-width:700px">';
-    tableHtml += '<thead><tr style="border-bottom:2px solid var(--border)">' +
-      '<th style="padding:6px 10px;text-align:left">Model</th>' +
-      '<th style="padding:6px 10px;text-align:right" title="Lower is better (relative scale)">AIC</th>' +
-      '<th style="padding:6px 10px;text-align:right" title="Lower is better (relative scale)">BIC</th>' +
-      '<th style="padding:6px 10px;text-align:right">R\u00B2</th>' +
-      '<th style="padding:6px 10px;text-align:right" title="p-value for non-linearity test">Non-lin. p</th>' +
-      '<th style="padding:6px 10px;text-align:left">Parameters</th>' +
-      '</tr></thead><tbody>';
-    for (const m of comparison.all) {
-      const isBest = m === best;
-      const bg = isBest ? 'background:rgba(37,99,235,0.08);font-weight:600' : '';
-      let params = '';
-      if (m.model === 'Linear') params = '\u03B2\u2081=' + m.b1.toFixed(4);
-      else if (m.model === 'Quadratic') params = '\u03B2\u2081=' + m.b1.toFixed(4) + ', \u03B2\u2082=' + m.b2.toFixed(6);
-      else if (m.model === 'Emax') params = 'E<sub>max</sub>=' + m.Emax.toFixed(3) + ', ED<sub>50</sub>=' + m.ED50.toFixed(1);
-      const pNL = (m.pNonlinear != null && isFinite(m.pNonlinear)) ? m.pNonlinear.toFixed(4)
-                : (m.pFP2vsFP1 != null && isFinite(m.pFP2vsFP1)) ? m.pFP2vsFP1.toFixed(4)
-                : '\u2014'; // em-dash
-      tableHtml += '<tr style="border-bottom:1px solid var(--border);' + bg + '">' +
-        '<td style="padding:5px 10px">' + m.model + (isBest ? ' \u2713' : '') + '</td>' +
-        '<td style="padding:5px 10px;text-align:right">' + m.aic.toFixed(1) + '</td>' +
-        '<td style="padding:5px 10px;text-align:right">' + m.bic.toFixed(1) + '</td>' +
-        '<td style="padding:5px 10px;text-align:right">' + (m.R2 * 100).toFixed(1) + '%</td>' +
-        '<td style="padding:5px 10px;text-align:right">' + pNL + '</td>' +
-        '<td style="padding:5px 10px">' + params + '</td></tr>';
-    }
-    tableHtml += '</tbody></table>';
+    // Model comparison table (using reusable function)
+    const tableHtml = renderModelComparisonTable(comparison.all, best.model);
     // Additional stats for best model
     let statsHtml = '<div style="margin-top:12px;font-size:0.85rem">';
     statsHtml += '<strong>Best model: ' + best.model + '</strong> (lowest AIC)<br>';
@@ -10097,6 +10181,39 @@ body.dark-mode .input-error { background: #451a1a !important; }
     svg += '<text x="15" y="' + (pad.top + plotH / 2) + '" text-anchor="middle" fill="' + (theme.text || '#1e293b') + '" font-size="13" font-weight="600" transform="rotate(-90,15,' + (pad.top + plotH / 2) + ')">Effect' + (isRatio ? ' (log scale)' : '') + '</text>';
     // Model label
     svg += '<text x="' + (W - pad.right) + '" y="' + (pad.top + 14) + '" text-anchor="end" fill="' + (theme.textMuted || '#6b7280') + '" font-size="11">' + model.model + ' (R\u00B2=' + (model.R2 * 100).toFixed(0) + '%)</text>';
+    // Study-specific curve overlays (for one-stage mixed-effects)
+    if (model.studyModels && model.studyModels.length > 0) {
+      const studyColors = ['#94a3b8', '#a78bfa', '#67e8f9', '#fbbf24', '#fb923c', '#f87171', '#a3e635', '#c084fc'];
+      const nSteps = 80;
+      for (let s = 0; s < model.studyModels.length; s++) {
+        const sm = model.studyModels[s];
+        const color = studyColors[s % studyColors.length];
+        let studyPath = '';
+        for (let i = 0; i <= nSteps; i++) {
+          const dose = minD + (maxD - minD) * i / nSteps;
+          const pred = sm.predict(dose);
+          if (!isFinite(pred)) continue;
+          const cx = xScale(dose);
+          const cy = yScale(pred);
+          if (cx >= pad.left && cx <= pad.left + plotW && cy >= pad.top && cy <= pad.top + plotH) {
+            studyPath += (studyPath === '' ? 'M' : 'L') + cx.toFixed(1) + ',' + cy.toFixed(1);
+          }
+        }
+        if (studyPath) {
+          svg += '<path d="' + studyPath + '" fill="none" stroke="' + color + '" stroke-width="1" stroke-dasharray="4,3" opacity="0.6"/>';
+        }
+      }
+      // Legend for study curves (only if <= 8 studies to avoid clutter)
+      if (model.studyModels.length <= 8) {
+        for (let s = 0; s < model.studyModels.length; s++) {
+          const sm = model.studyModels[s];
+          const color = studyColors[s % studyColors.length];
+          const lx = pad.left + plotW - 8;
+          const ly = pad.top + 16 + s * 14;
+          svg += '<text x="' + lx + '" y="' + ly + '" text-anchor="end" font-size="9" fill="' + color + '">' + escapeHtml(sm.studyId) + '</text>';
+        }
+      }
+    }
     svg += '</svg>';
     return svg;
   }
