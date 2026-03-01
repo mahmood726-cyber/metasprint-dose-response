@@ -13831,6 +13831,7 @@ body.dark-mode .input-error { background: #451a1a !important; }
       case 'matrix': renderMatrixView(trials); break;
       case 'gapscatter': renderGapScatterView(trials); break;
       case 'pipeline': renderPipelineView(trials); break;
+      case 'drlandscape': renderDRLandscape(trials); break;
     }
     safeSetStorage('msa-dr-universe-view', viewName);
   }
@@ -17415,6 +17416,88 @@ body.dark-mode .input-error { background: #451a1a !important; }
       escapeHtml(phase) + (status ? ' / ' + escapeHtml(status.replace(/_/g, ' ')) : '') + ' \u2014 ' + matchTrials.length + ' trials',
       html
     );
+  }
+
+  // ---- VIEW 6: DR Landscape (HTML) ----
+  // Dose-ranging trial distribution by drug class
+  function renderDRLandscape(trials) {
+    const el = document.getElementById('universeViewDRLandscape');
+    if (!el) return;
+
+    const allTrials = trials || currentGridTrials || [];
+    const drTrials = allTrials.filter(t => t.doseRanging);
+    const totalTrials = allTrials.length;
+
+    if (drTrials.length === 0) {
+      el.innerHTML = '<p style="color:var(--text-muted);padding:24px">No dose-ranging trials found. Try loading a subspecialty first.</p>';
+      return;
+    }
+
+    // Group by drug class (first non-placebo intervention name)
+    const byDrug = {};
+    for (const t of drTrials) {
+      const ivNames = (t.interventions || [])
+        .map(iv => typeof iv === 'string' ? iv : (iv.name || ''))
+        .filter(n => !/\bplacebo\b|\bsham\b|\bcontrol\b/i.test(n));
+      const drugLabel = ivNames[0] || 'Unknown';
+      if (!byDrug[drugLabel]) byDrug[drugLabel] = [];
+      byDrug[drugLabel].push(t);
+    }
+
+    const drugEntries = Object.entries(byDrug).sort((a, b) => b[1].length - a[1].length);
+    const topN = drugEntries.slice(0, 20);
+    const pctDR = totalTrials > 0 ? (drTrials.length / totalTrials * 100).toFixed(1) : '0';
+
+    let html = '<div style="padding:16px">';
+
+    // Summary cards
+    html += '<h3 style="font-size:1rem;margin-bottom:12px">Dose-Response Landscape</h3>';
+    html += '<div style="display:flex;gap:24px;margin-bottom:16px;flex-wrap:wrap">';
+    html += '<div style="padding:12px 16px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius)"><div style="font-size:1.5rem;font-weight:700;color:#7c3aed">' + drTrials.length + '</div><div style="font-size:0.8rem;color:var(--text-muted)">Dose-ranging trials</div></div>';
+    html += '<div style="padding:12px 16px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius)"><div style="font-size:1.5rem;font-weight:700;color:var(--primary)">' + pctDR + '%</div><div style="font-size:0.8rem;color:var(--text-muted)">of universe</div></div>';
+    html += '<div style="padding:12px 16px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius)"><div style="font-size:1.5rem;font-weight:700;color:var(--success)">' + drugEntries.length + '</div><div style="font-size:0.8rem;color:var(--text-muted)">Drug classes with DR data</div></div>';
+    html += '</div>';
+
+    // Horizontal bar chart — top 20 drug classes
+    const maxCount = topN.length > 0 ? topN[0][1].length : 1;
+    html += '<h4 style="font-size:0.9rem;margin:16px 0 8px">Top Drug Classes with Dose-Ranging Trials</h4>';
+    html += '<div style="max-width:700px">';
+    for (const [drug, dTrials] of topN) {
+      const pct = (dTrials.length / maxCount * 100).toFixed(0);
+      const uniqueDoses = [...new Set(dTrials.flatMap(t => t.doseLevels || []))].sort((a, b) => a - b);
+      const doseRange = uniqueDoses.length > 0 ? uniqueDoses[0] + '\u2013' + uniqueDoses[uniqueDoses.length - 1] + ' ' + (dTrials[0].doseUnit || '') : '';
+      const escapedDrug = drug.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+      html += '<div style="margin-bottom:6px;display:flex;align-items:center;gap:8px">';
+      html += '<div style="width:180px;font-size:0.8rem;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + escapedDrug + '">' + escapedDrug.slice(0, 30) + '</div>';
+      html += '<div style="flex:1;height:20px;background:var(--bg);border-radius:4px;overflow:hidden">';
+      html += '<div style="height:100%;width:' + pct + '%;background:linear-gradient(90deg,#7c3aed,#a78bfa);border-radius:4px;display:flex;align-items:center;padding-left:6px"><span style="font-size:0.7rem;color:#fff;font-weight:600">' + dTrials.length + '</span></div>';
+      html += '</div>';
+      html += '<div style="width:120px;font-size:0.7rem;color:var(--text-muted)">' + doseRange + '</div>';
+      html += '</div>';
+    }
+    html += '</div>';
+
+    // Opportunities table — top 10
+    html += '<h4 style="font-size:0.9rem;margin:20px 0 8px">Top DR Review Opportunities</h4>';
+    html += '<table style="font-size:0.8rem;border-collapse:collapse;width:100%;max-width:800px">';
+    html += '<thead><tr style="border-bottom:2px solid var(--border)"><th style="padding:6px 10px;text-align:left">Drug Class</th><th style="padding:6px 10px;text-align:right">DR Trials</th><th style="padding:6px 10px;text-align:right">Enrollment</th><th style="padding:6px 10px;text-align:left">Dose Range</th><th style="padding:6px 10px;text-align:left">Phases</th><th style="padding:6px 10px"></th></tr></thead><tbody>';
+    for (const [drug, dTrials] of topN.slice(0, 10)) {
+      const enrollment = dTrials.reduce((s, t) => s + (parseInt(t.enrollment, 10) || 0), 0);
+      const phases = [...new Set(dTrials.map(t => t.phase || '').filter(Boolean))].join(', ');
+      const uniqueDoses = [...new Set(dTrials.flatMap(t => t.doseLevels || []))].sort((a, b) => a - b);
+      const doseRange = uniqueDoses.length > 0 ? uniqueDoses[0] + '\u2013' + uniqueDoses[uniqueDoses.length - 1] + ' ' + (dTrials[0].doseUnit || '') : '';
+      const escapedDrug = drug.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/'/g, "\\'").replace(/"/g, '&quot;');
+      html += '<tr style="border-bottom:1px solid var(--border)">';
+      html += '<td style="padding:6px 10px">' + escapedDrug.slice(0, 40) + '</td>';
+      html += '<td style="padding:6px 10px;text-align:right;font-weight:600;color:#7c3aed">' + dTrials.length + '</td>';
+      html += '<td style="padding:6px 10px;text-align:right">' + (enrollment > 0 ? enrollment.toLocaleString() : '\u2014') + '</td>';
+      html += '<td style="padding:6px 10px">' + doseRange + '</td>';
+      html += '<td style="padding:6px 10px">' + phases + '</td>';
+      html += '<td style="padding:6px 10px"><button class="btn-sm btn-info" onclick="startReviewFromUniverse(\'' + escapedDrug + '\',currentGridSubcat?.id)">Start DR Review</button></td>';
+      html += '</tr>';
+    }
+    html += '</tbody></table></div>';
+    el.innerHTML = html;
   }
 
   // ============================================================
