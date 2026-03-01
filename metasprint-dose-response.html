@@ -9215,6 +9215,362 @@ body.dark-mode .input-error { background: #451a1a !important; }
     return { passed, failed, details: results };
   }
 
+  // ═══════════════════════════════════════════════════════════════════════
+  // Restricted Cubic Splines (RCS) Dose-Response Model
+  // Harrell (2001) percentile-based knot placement + truncated power basis
+  // ═══════════════════════════════════════════════════════════════════════
+
+  /**
+   * Compute RCS knot positions from dose vector using Harrell (2001) percentile recommendations.
+   * @param {number[]} doses - array of dose values
+   * @param {number} nKnots - number of knots (3, 4, or 5)
+   * @returns {number[]|null} sorted knot positions, or null if invalid
+   */
+  function computeRCSKnots(doses, nKnots) {
+    if (!doses || doses.length < 2) return null;
+    const sorted = doses.slice().sort((a, b) => a - b);
+    const n = sorted.length;
+
+    // Percentile function (linear interpolation)
+    function percentile(p) {
+      const idx = (p / 100) * (n - 1);
+      const lo = Math.floor(idx);
+      const hi = Math.ceil(idx);
+      if (lo === hi) return sorted[lo];
+      return sorted[lo] + (sorted[hi] - sorted[lo]) * (idx - lo);
+    }
+
+    let pcts;
+    if (nKnots === 3) {
+      pcts = [10, 50, 90];
+    } else if (nKnots === 4) {
+      pcts = [5, 35, 65, 95];
+    } else if (nKnots === 5) {
+      pcts = [5, 27.5, 50, 72.5, 95];
+    } else {
+      return null; // unsupported knot count
+    }
+
+    const knots = pcts.map(p => percentile(p));
+    // Verify knots are strictly increasing
+    for (let i = 1; i < knots.length; i++) {
+      if (knots[i] <= knots[i - 1]) return null;
+    }
+    return knots;
+  }
+
+  /**
+   * Compute RCS basis matrix using Harrell truncated power basis with boundary constraints.
+   * Returns n x (nKnots-1) design matrix: [linear, spline1, ..., spline_{k-2}]
+   * @param {number[]} doses - array of dose values
+   * @param {number[]} knots - sorted knot positions from computeRCSKnots
+   * @returns {number[][]|null} design matrix, or null if degenerate
+   */
+  function computeRCSBasis(doses, knots) {
+    if (!doses || !knots || knots.length < 3) return null;
+    const n = doses.length;
+    const k = knots.length;
+    const kLast = knots[k - 1];
+    const kPrev = knots[k - 2];
+    const denom = kLast - kPrev;
+    if (Math.abs(denom) < 1e-15) return null; // degenerate boundary knots
+
+    const nCols = k - 1; // linear + (k-2) spline terms
+    const basis = [];
+
+    for (let i = 0; i < n; i++) {
+      const d = doses[i];
+      const row = new Array(nCols);
+      // Column 0: linear term
+      row[0] = d;
+      // Columns 1..k-2: constrained cubic spline basis (Harrell)
+      for (let j = 0; j < k - 2; j++) {
+        const tj = knots[j];
+        const h1 = Math.max(0, d - tj);
+        const h2 = Math.max(0, d - kPrev);
+        const h3 = Math.max(0, d - kLast);
+        const norm = (kLast - tj) * (kLast - tj);
+        if (Math.abs(norm) < 1e-15) { basis.length = 0; return null; }
+        row[j + 1] = (h1 * h1 * h1 - h2 * h2 * h2 * (kLast - tj) / denom + h3 * h3 * h3 * (kPrev - tj) / denom) / norm;
+      }
+      basis.push(row);
+    }
+    return basis;
+  }
+
+  /**
+   * Fit Restricted Cubic Splines dose-response model via WLS.
+   * Uses Harrell (2001) knot placement and truncated power basis.
+   * @param {Array} points - array of {dose, effect, se} objects
+   * @param {number} [nKnots=3] - number of knots (3, 4, or 5)
+   * @returns {Object|null} model fit result or null if fitting fails
+   */
+  function fitRCSDR(points, nKnots) {
+    nKnots = nKnots ?? 3;
+    const minPts = nKnots + 1;
+    if (!points || points.length < minPts) return null;
+
+    const n = points.length;
+    const doses = points.map(p => p.dose);
+    const y = points.map(p => p.effect);
+    const w = points.map(p => {
+      const s = p.se > 0 ? p.se : 1;
+      return 1 / (s * s);
+    });
+
+    // Compute knots
+    const knots = computeRCSKnots(doses, nKnots);
+    if (!knots) return null;
+
+    // Compute RCS basis (n x (nKnots-1) matrix: linear + spline terms)
+    const rcsBasis = computeRCSBasis(doses, knots);
+    if (!rcsBasis) return null;
+
+    // Build full design matrix X = [1 | rcsBasis] with intercept column
+    const nBasisCols = nKnots - 1;
+    const nParams = 1 + nBasisCols; // intercept + linear + (nKnots-2) spline terms
+    const X = [];
+    for (let i = 0; i < n; i++) {
+      const row = new Array(nParams);
+      row[0] = 1; // intercept
+      for (let j = 0; j < nBasisCols; j++) {
+        row[j + 1] = rcsBasis[i][j];
+      }
+      X.push(row);
+    }
+
+    // Fit via WLS
+    const fit = wlsFit(X, y, w);
+    if (!fit) return null;
+
+    const beta = fit.beta;
+    const vcov = fit.vcov;
+    const sse = fit.sse;
+
+    // Goodness of fit: weighted R-squared
+    let sw = 0, swy = 0;
+    for (let i = 0; i < n; i++) { sw += w[i]; swy += w[i] * y[i]; }
+    const yBar = sw > 0 ? swy / sw : 0;
+    let ssTot = 0;
+    for (let i = 0; i < n; i++) {
+      ssTot += w[i] * (y[i] - yBar) * (y[i] - yBar);
+    }
+    const R2 = ssTot > 0 ? 1 - sse / ssTot : 0;
+
+    // AIC, BIC (matching existing model formulas)
+    const kp = nParams;
+    const aic = n * Math.log(sse / n + 1e-15) + 2 * kp;
+    const bic = n * Math.log(sse / n + 1e-15) + kp * Math.log(n);
+
+    // Non-linearity Wald test: H0 = all spline coefficients = 0
+    // Spline coefficients are beta[2], beta[3], ..., beta[nParams-1]
+    // i.e., indices 2..nParams-1 (skipping intercept and linear term)
+    const nSpline = nKnots - 2;
+    let pNonlinear = NaN;
+    if (nSpline > 0) {
+      // Extract spline sub-vector and sub-matrix of vcov
+      const betaSpline = new Array(nSpline);
+      const vcovSpline = [];
+      for (let i = 0; i < nSpline; i++) {
+        betaSpline[i] = beta[2 + i];
+        const row = new Array(nSpline);
+        for (let j = 0; j < nSpline; j++) {
+          row[j] = vcov[2 + i][2 + j];
+        }
+        vcovSpline.push(row);
+      }
+      // Invert vcov sub-matrix
+      const vcovSplineInv = matInvertNxN(vcovSpline);
+      if (vcovSplineInv) {
+        // Wald = beta' * vcov^{-1} * beta
+        let waldStat = 0;
+        for (let i = 0; i < nSpline; i++) {
+          for (let j = 0; j < nSpline; j++) {
+            waldStat += betaSpline[i] * vcovSplineInv[i][j] * betaSpline[j];
+          }
+        }
+        if (isFinite(waldStat) && waldStat >= 0) {
+          pNonlinear = 1 - chi2CDF(waldStat, nSpline);
+        }
+      }
+    }
+
+    // Standard errors from diagonal of vcov
+    const se = new Array(nParams);
+    for (let i = 0; i < nParams; i++) {
+      se[i] = Math.sqrt(Math.max(0, vcov[i][i]));
+    }
+
+    // Parameter description string
+    const knotStr = knots.map(v => v.toFixed(2)).join(', ');
+    const paramStr = `RCS-${nKnots} (knots: ${knotStr})`;
+
+    // Prediction function: compute basis for a single dose, then dot with beta
+    function predictSingle(d) {
+      const kk = knots.length;
+      const kkLast = knots[kk - 1];
+      const kkPrev = knots[kk - 2];
+      const kkDenom = kkLast - kkPrev;
+      const xVec = new Array(nParams);
+      xVec[0] = 1; // intercept
+      xVec[1] = d; // linear
+      for (let j = 0; j < kk - 2; j++) {
+        const tj = knots[j];
+        const h1 = Math.max(0, d - tj);
+        const h2 = Math.max(0, d - kkPrev);
+        const h3 = Math.max(0, d - kkLast);
+        const norm = (kkLast - tj) * (kkLast - tj);
+        xVec[j + 2] = (h1 * h1 * h1 - h2 * h2 * h2 * (kkLast - tj) / kkDenom + h3 * h3 * h3 * (kkPrev - tj) / kkDenom) / norm;
+      }
+      return xVec;
+    }
+
+    const predict = function(d) {
+      const xVec = predictSingle(d);
+      let yh = 0;
+      for (let i = 0; i < nParams; i++) yh += xVec[i] * beta[i];
+      return yh;
+    };
+
+    const predictCI = function(d, zCrit) {
+      const xVec = predictSingle(d);
+      let yh = 0;
+      for (let i = 0; i < nParams; i++) yh += xVec[i] * beta[i];
+      // Variance: x' * vcov * x
+      let varY = 0;
+      for (let i = 0; i < nParams; i++) {
+        for (let j = 0; j < nParams; j++) {
+          varY += xVec[i] * vcov[i][j] * xVec[j];
+        }
+      }
+      const seh = Math.sqrt(Math.max(0, varY));
+      return { y: yh, lo: yh - zCrit * seh, hi: yh + zCrit * seh };
+    };
+
+    return {
+      model: `RCS-${nKnots}`,
+      beta,
+      knots,
+      se,
+      pNonlinear,
+      R2,
+      aic,
+      bic,
+      fitted: fit.fitted,
+      residuals: fit.residuals,
+      predict,
+      predictCI,
+      paramStr,
+      nParams,
+      vcov,
+      nPoints: n
+    };
+  }
+
+  /**
+   * Self-test for RCS dose-response model.
+   * Returns { passed, failed, details }.
+   */
+  function _testRCS() {
+    const results = [];
+    let passed = 0, failed = 0;
+
+    function assert(name, condition, msg) {
+      if (condition) { passed++; results.push({ name, status: 'PASS' }); }
+      else { failed++; results.push({ name, status: 'FAIL', msg }); }
+    }
+    function approxEq(a, b, tol) { return Math.abs(a - b) < (tol ?? 1e-6); }
+
+    // Test 1: RCS-3 with 5 non-linear points
+    {
+      const pts = [
+        { dose: 0, effect: 0.0, se: 0.1 },
+        { dose: 10, effect: 0.8, se: 0.15 },
+        { dose: 20, effect: 1.5, se: 0.12 },
+        { dose: 40, effect: 1.8, se: 0.2 },
+        { dose: 60, effect: 1.7, se: 0.18 }
+      ];
+      const fit3 = fitRCSDR(pts, 3);
+      assert('RCS-3 fits (not null)', fit3 !== null, 'returned null');
+      assert('RCS-3 finite AIC', fit3 && isFinite(fit3.aic), `AIC=${fit3 && fit3.aic}`);
+      assert('RCS-3 predict(0) close to data',
+        fit3 && approxEq(fit3.predict(0), 0.0, 0.5),
+        `predict(0)=${fit3 && fit3.predict(0)}`);
+      assert('RCS-3 R2 > 0', fit3 && fit3.R2 > 0, `R2=${fit3 && fit3.R2}`);
+      assert('RCS-3 finite pNonlinear',
+        fit3 && isFinite(fit3.pNonlinear),
+        `pNonlinear=${fit3 && fit3.pNonlinear}`);
+      assert('RCS-3 has 3 knots', fit3 && fit3.knots && fit3.knots.length === 3,
+        `knots.length=${fit3 && fit3.knots && fit3.knots.length}`);
+      assert('RCS-3 model name', fit3 && fit3.model === 'RCS-3', `model=${fit3 && fit3.model}`);
+      assert('RCS-3 predictCI returns CI',
+        fit3 && fit3.predictCI(10, 1.96).lo < fit3.predictCI(10, 1.96).hi,
+        'CI lo >= hi');
+    }
+
+    // Test 2: RCS-4 with 10 points
+    {
+      const pts = [];
+      for (let i = 0; i < 10; i++) {
+        const d = i * 10;
+        const eff = 2 * Math.sin(d * Math.PI / 90) + 0.1 * d / 10;
+        pts.push({ dose: d, effect: eff, se: 0.2 });
+      }
+      const fit4 = fitRCSDR(pts, 4);
+      assert('RCS-4 fits (not null)', fit4 !== null, 'returned null');
+      assert('RCS-4 has 4 knots', fit4 && fit4.knots && fit4.knots.length === 4,
+        `knots.length=${fit4 && fit4.knots && fit4.knots.length}`);
+      assert('RCS-4 finite AIC', fit4 && isFinite(fit4.aic), `AIC=${fit4 && fit4.aic}`);
+      assert('RCS-4 nParams correct', fit4 && fit4.nParams === 4,
+        `nParams=${fit4 && fit4.nParams}`);
+    }
+
+    // Test 3: Too few points returns null
+    {
+      const pts = [
+        { dose: 0, effect: 0, se: 0.1 },
+        { dose: 10, effect: 1, se: 0.1 },
+        { dose: 20, effect: 2, se: 0.1 }
+      ];
+      const fitTooFew = fitRCSDR(pts, 3); // needs 4 points for 3 knots
+      assert('RCS-3 too few points (3 < 4) returns null', fitTooFew === null,
+        `expected null, got ${fitTooFew}`);
+    }
+
+    // Test 4: computeRCSKnots basic
+    {
+      const doses = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100];
+      const k3 = computeRCSKnots(doses, 3);
+      assert('knots-3 returns 3 values', k3 && k3.length === 3, `length=${k3 && k3.length}`);
+      assert('knots-3 strictly increasing', k3 && k3[0] < k3[1] && k3[1] < k3[2],
+        `knots=${k3}`);
+      const k5 = computeRCSKnots(doses, 5);
+      assert('knots-5 returns 5 values', k5 && k5.length === 5, `length=${k5 && k5.length}`);
+    }
+
+    // Test 5: computeRCSBasis dimensions
+    {
+      const doses = [0, 10, 20, 30, 40];
+      const knots = computeRCSKnots(doses, 3);
+      if (knots) {
+        const basis = computeRCSBasis(doses, knots);
+        assert('basis dimensions n=5, cols=2',
+          basis && basis.length === 5 && basis[0].length === 2,
+          `shape=${basis && basis.length}x${basis && basis[0] && basis[0].length}`);
+      } else {
+        assert('basis dimensions (knots null)', false, 'knots were null');
+      }
+    }
+
+    console.log(`_testRCS: ${passed} passed, ${failed} failed`);
+    if (failed > 0) console.warn('FAILURES:', results.filter(r => r.status === 'FAIL'));
+    return { passed, failed, details: results };
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // End Restricted Cubic Splines (RCS)
+  // ═══════════════════════════════════════════════════════════════════════
+
   /**
    * Compare dose-response models and select the best by AIC.
    */
@@ -9226,6 +9582,11 @@ body.dark-mode .input-error { background: #451a1a !important; }
     if (quad) models.push(quad);
     const emax = fitEmaxDR(points);
     if (emax) models.push(emax);
+    // RCS models (3, 4, 5 knots)
+    for (const nk of [3, 4, 5]) {
+      const rcs = fitRCSDR(points, nk);
+      if (rcs) models.push(rcs);
+    }
     if (models.length === 0) return null;
     models.sort((a, b) => a.aic - b.aic);
     return { best: models[0], all: models };
