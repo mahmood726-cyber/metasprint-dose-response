@@ -217,5 +217,142 @@ class TestEdgeCases:
         assert result is None
 
 
+class TestDRUniverse:
+    """Test DR Universe features: dose-ranging detection, DR signal, landscape tab."""
+
+    def test_dose_ranging_detection_basic(self, driver):
+        """detectDoseRanging should flag a trial with 3+ dose levels."""
+        result = driver.execute_script("""
+            var trial = {
+                arms: [
+                    {label: 'Placebo'},
+                    {label: '10 mg once daily'},
+                    {label: '20 mg once daily'},
+                    {label: '40 mg once daily'}
+                ]
+            };
+            detectDoseRanging(trial);
+            return {dr: trial.doseRanging, levels: trial.doseLevels, unit: trial.doseUnit};
+        """)
+        assert result is not None
+        assert result['dr'] is True
+        assert len(result['levels']) >= 3
+        assert result['unit'] == 'mg'
+
+    def test_dose_ranging_not_flagged_for_placebo_only(self, driver):
+        """Trial with only placebo arms should not be dose-ranging."""
+        result = driver.execute_script("""
+            var trial = {
+                arms: [
+                    {label: 'Placebo'},
+                    {label: 'Standard of care'}
+                ]
+            };
+            detectDoseRanging(trial);
+            return {dr: trial.doseRanging, levels: trial.doseLevels};
+        """)
+        assert result is not None
+        assert result['dr'] is False
+
+    def test_dose_ranging_handles_mcg_units(self, driver):
+        """Should detect mcg as a dose unit."""
+        result = driver.execute_script("""
+            var trial = {
+                arms: [
+                    {label: '100 mcg'},
+                    {label: '200 mcg'},
+                    {label: '400 mcg'},
+                    {label: 'Placebo'}
+                ]
+            };
+            detectDoseRanging(trial);
+            return {dr: trial.doseRanging, unit: trial.doseUnit};
+        """)
+        assert result is not None
+        assert result['dr'] is True
+        assert result['unit'] == 'mcg'
+
+    def test_dose_ranging_too_few_levels(self, driver):
+        """Fewer than 3 dose levels should not flag as dose-ranging."""
+        result = driver.execute_script("""
+            var trial = {
+                arms: [
+                    {label: 'Placebo'},
+                    {label: '10 mg'},
+                    {label: '20 mg'}
+                ]
+            };
+            detectDoseRanging(trial);
+            return {dr: trial.doseRanging};
+        """)
+        assert result is not None
+        assert result['dr'] is False
+
+    def test_dose_ranging_self_test(self, driver):
+        """Run the inline _testDoseRanging self-test."""
+        result = driver.execute_script('return _testDoseRanging()')
+        assert result is True
+
+    def test_dr_signal_detection(self, driver):
+        """computeDRSignal should detect DR terms in text."""
+        result = driver.execute_script("""
+            var r1 = computeDRSignal('This dose-response study evaluated dose-ranging');
+            var r2 = computeDRSignal('A randomized controlled trial of aspirin');
+            var r3 = computeDRSignal(null);
+            return {multi: r1, none: r2, nil: r3};
+        """)
+        assert result is not None
+        assert result['multi'] >= 0.7  # 2+ DR terms
+        assert result['none'] == 0     # No DR terms
+        assert result['nil'] == 0      # null input
+
+    def test_dr_signal_self_test(self, driver):
+        """Run the inline _testDRSignal self-test."""
+        result = driver.execute_script('return _testDRSignal()')
+        assert result is True
+
+    def test_dr_landscape_tab_exists(self, driver):
+        """DR Landscape tab button should exist."""
+        tabs = driver.find_elements(By.CSS_SELECTOR, 'button[data-view="drlandscape"]')
+        assert len(tabs) == 1
+
+    def test_dr_landscape_container_exists(self, driver):
+        """DR Landscape container div should exist."""
+        el = driver.find_elements(By.ID, 'universeViewDRLandscape')
+        assert len(el) == 1
+
+    def test_render_dr_landscape_with_data(self, driver):
+        """renderDRLandscape should populate the container with content."""
+        result = driver.execute_script("""
+            var trials = [];
+            for (var i = 0; i < 5; i++) {
+                trials.push({
+                    nctId: 'NCT0000000' + i,
+                    title: 'Test trial ' + i,
+                    doseRanging: true,
+                    doseLevels: [10, 20, 40],
+                    doseUnit: 'mg',
+                    interventions: [{name: 'DrugA'}],
+                    enrollment: 100,
+                    phase: 'Phase 3'
+                });
+            }
+            trials.push({
+                nctId: 'NCT00000010',
+                title: 'Non-DR trial',
+                doseRanging: false,
+                interventions: [{name: 'DrugB'}],
+                enrollment: 50,
+                phase: 'Phase 2'
+            });
+            renderDRLandscape(trials);
+            var el = document.getElementById('universeViewDRLandscape');
+            return {hasContent: el.innerHTML.length > 50, hasDRCount: el.innerHTML.includes('5')};
+        """)
+        assert result is not None
+        assert result['hasContent'] is True
+        assert result['hasDRCount'] is True
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])
