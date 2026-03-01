@@ -4552,6 +4552,7 @@ body.dark-mode .input-error { background: #451a1a !important; }
           (autoScreenScores[r.id].pillarScore > 0 ? ' <span style="color:#059669">Pillar: ' + (autoScreenScores[r.id].pillarScore * 100).toFixed(0) + '%</span>' : '') +
           (autoScreenScores[r.id].rctSignal > 0 ? ' <span style="color:#d97706">RCT: ' + (autoScreenScores[r.id].rctSignal * 100).toFixed(0) + '%</span>' : '') +
           (autoScreenScores[r.id].cardioSignal > 0 ? ' <span style="color:#dc2626">CV: ' + (autoScreenScores[r.id].cardioSignal * 100).toFixed(0) + '%</span>' : '') +
+          (autoScreenScores[r.id].drSignal > 0 ? ' <span style="color:#7c3aed">DR: ' + (autoScreenScores[r.id].drSignal * 100).toFixed(0) + '%</span>' : '') +
         '</div>' +
         (autoScreenScores[r.id].reasonCodes && autoScreenScores[r.id].reasonCodes.length ?
           '<div style="font-size:0.65rem;color:var(--text-muted);margin-top:2px">' +
@@ -5332,6 +5333,26 @@ body.dark-mode .input-error { background: #451a1a !important; }
     return Math.min(1, matches.length * 0.25);
   }
 
+  // AS-DR: Dose-Response signal detection for screening relevance boost
+  const DR_SIGNAL_TERMS = [
+    /dose[\s-]?response/i, /dose[\s-]?rang/i, /dose[\s-]?find/i,
+    /dose[\s-]?depend/i, /dose[\s-]?level/i, /dose[\s-]?titrat/i,
+    /dose[\s-]?escala/i, /multiple\s+dos/i, /graded\s+dos/i,
+    /\bmg\s*\/\s*day\b/i, /\bmg\s*\/\s*kg\b/i
+  ];
+
+  function computeDRSignal(text) {
+    if (!text) return 0;
+    var matches = 0;
+    for (var i = 0; i < DR_SIGNAL_TERMS.length; i++) {
+      if (DR_SIGNAL_TERMS[i].test(text)) matches++;
+    }
+    if (matches >= 3) return 1.0;
+    if (matches >= 2) return 0.7;
+    if (matches >= 1) return 0.4;
+    return 0;
+  }
+
   function hardGateDecision(features) {
     const { universeMatch = { matched: false, score: 0 }, rctSignal, cardioSignal, nonCardioSignal, sourceTrust, hasRegistryId } = features;
     const strictRecall = features.strictRecall ?? true;
@@ -5472,6 +5493,7 @@ body.dark-mode .input-error { background: #451a1a !important; }
     ref.rctSignalScore = computeRCTSignal(text);
     ref.cardioSignalScore = computeCardioSignal(text);
     ref.nonCardioSignalScore = computeNonCardioSignal(text);
+    ref.drSignalScore = computeDRSignal(text);
     ref.sourceTrustScore = getSourceTrust(ref);
 
     return ref;
@@ -5651,6 +5673,7 @@ body.dark-mode .input-error { background: #451a1a !important; }
         rctSignal: ref.rctSignalScore ?? computeRCTSignal(docs[i].text),
         cardioSignal: ref.cardioSignalScore ?? computeCardioSignal(docs[i].text),
         nonCardioSignal: ref.nonCardioSignalScore ?? computeNonCardioSignal(docs[i].text),
+        drSignal: ref.drSignalScore ?? computeDRSignal(docs[i].text),
         universeMatchScore: ref.universeMatchScore ?? 0,
         sourceTrust: ref.sourceTrustScore ?? 0.3,
         hasRegistryId: !!((ref.nctId || '').match(/\bNCT\d{8}\b/i) || (ref.title || '').match(/\bNCT\d{8}\b/i) || (ref.abstract || '').match(/\bNCT\d{8}\b/i)),
@@ -5680,11 +5703,15 @@ body.dark-mode .input-error { background: #451a1a !important; }
         } else {
           // Phase 2: Calibrated probability model (thresholding applied after calibration pass)
           pInclude = computeIncludeProbability(features);
+          // DR boost: increase inclusion probability for dose-response papers (additive)
+          if (features.drSignal >= 0.7) pInclude = Math.min(1, pInclude + 0.15);
+          else if (features.drSignal >= 0.4) pInclude = Math.min(1, pInclude + 0.08);
           allPIncludes.push(pInclude);
           confidence = Math.abs(pInclude - 0.5) * 2;
           reasonCodes = ['MODEL_SCORE'];
           if (features.rctSignal >= 0.7) reasonCodes.push('RCT_SIGNAL');
           if (features.cardioSignal >= 0.5) reasonCodes.push('CARDIO_SIGNAL');
+          if (features.drSignal >= 0.4) reasonCodes.push('DR_SIGNAL');
           if (features.universeMatchScore > 0) reasonCodes.push('UNIVERSE_PARTIAL');
           pendingModelDecisions.push({ refId: ref.id, features, pInclude, confidence, reasonCodes });
           verdict = 'needs-review'; // temporary; finalized after threshold calibration
@@ -5716,6 +5743,7 @@ body.dark-mode .input-error { background: #451a1a !important; }
         rctSignal: features.rctSignal,
         cardioSignal: features.cardioSignal,
         nonCardioSignal: features.nonCardioSignal,
+        drSignal: features.drSignal,
         universeMatchScore: features.universeMatchScore,
         universeMatchType: ref.universeMatchType ?? 'none',
         sourceTrust: features.sourceTrust,
@@ -5994,6 +6022,13 @@ body.dark-mode .input-error { background: #451a1a !important; }
       html += '<div style="text-align:center;padding:6px;background:#fef2f2;border-radius:4px">' +
         '<div style="font-size:0.7rem;color:#dc2626;font-weight:600">Cardio Signal</div>' +
         '<div style="font-size:1.1rem;font-weight:700">' + (s.cardioSignal * 100).toFixed(0) + '%</div></div>';
+    }
+
+    // DR Signal
+    if (s.drSignal > 0) {
+      html += '<div style="text-align:center;padding:6px;background:#f5f3ff;border-radius:4px">' +
+        '<div style="font-size:0.7rem;color:#7c3aed;font-weight:600">DR Signal</div>' +
+        '<div style="font-size:1.1rem;font-weight:700">' + (s.drSignal * 100).toFixed(0) + '%</div></div>';
     }
 
     // Non-Cardio Signal
@@ -9968,6 +10003,23 @@ body.dark-mode .input-error { background: #451a1a !important; }
     return results.every(r => r.pass);
   }
 
+  function _testDRSignal() {
+    var results = [];
+    results.push({ test: 'dose-response', pass: computeDRSignal('A dose-response meta-analysis of X') >= 0.4 });
+    results.push({ test: 'dose-ranging', pass: computeDRSignal('This dose-ranging study evaluated 3 doses') >= 0.4 });
+    results.push({ test: 'multi-term', pass: computeDRSignal('dose-response dose-finding dose-dependent') >= 0.7 });
+    results.push({ test: 'no match', pass: computeDRSignal('A randomized trial of drug X vs placebo') === 0 });
+    results.push({ test: 'mg/kg', pass: computeDRSignal('received 0.5 mg/kg daily') >= 0.4 });
+    results.push({ test: 'dose-titration', pass: computeDRSignal('A dose-titration protocol was used') >= 0.4 });
+    results.push({ test: 'dose-escalation', pass: computeDRSignal('dose-escalation phase 1 study') >= 0.4 });
+    results.push({ test: 'multiple doses', pass: computeDRSignal('multiple doses were tested in this study') >= 0.4 });
+    results.push({ test: 'mg/day', pass: computeDRSignal('patients received 100 mg/day') >= 0.4 });
+    results.push({ test: 'null input', pass: computeDRSignal(null) === 0 });
+    results.push({ test: 'empty input', pass: computeDRSignal('') === 0 });
+    console.table(results);
+    return results.every(function(r) { return r.pass; });
+  }
+
   /**
    * Master test runner — executes all dose-response self-test suites.
    * Call from browser console: _runAllDRTests()
@@ -9983,6 +10035,7 @@ body.dark-mode .input-error { background: #451a1a !important; }
     try { results.oneStage = _testOneStage(); } catch(e) { results.oneStage = false; console.error('OneStage tests error:', e); }
     try { results.continuous = _testContinuousInput(); } catch(e) { results.continuous = false; console.error('Continuous tests error:', e); }
     try { results.doseRanging = _testDoseRanging(); } catch(e) { results.doseRanging = false; console.error('DoseRanging tests error:', e); }
+    try { results.drSignal = _testDRSignal(); } catch(e) { results.drSignal = false; console.error('DRSignal tests error:', e); }
 
     console.log('=== Results ===');
     console.table(results);
