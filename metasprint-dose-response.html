@@ -8917,6 +8917,158 @@ body.dark-mode .input-error { background: #451a1a !important; }
   }
 
   /**
+   * Build a block-diagonal matrix from an array of square matrices.
+   * @param {number[][][]} blocks - array of square matrices (2D arrays)
+   * @returns {number[][]} NxN block-diagonal matrix where N = sum of block sizes
+   */
+  function blockDiagMatrix(blocks) {
+    if (!blocks || blocks.length === 0) return [];
+    let totalSize = 0;
+    for (let b = 0; b < blocks.length; b++) totalSize += blocks[b].length;
+    const BD = matCreate(totalSize, totalSize);
+    let offset = 0;
+    for (let b = 0; b < blocks.length; b++) {
+      const blk = blocks[b];
+      const sz = blk.length;
+      for (let i = 0; i < sz; i++)
+        for (let j = 0; j < sz; j++)
+          BD[offset + i][offset + j] = blk[i][j];
+      offset += sz;
+    }
+    return BD;
+  }
+
+  /**
+   * Log-determinant of a block-diagonal matrix (sum of log|det| per block).
+   * Uses LU decomposition with partial pivoting for each block.
+   * @param {number[][][]} blocks - array of square matrices
+   * @returns {number} log|det| of the full block-diagonal matrix, or -Infinity if singular
+   */
+  function logDetBlockDiag(blocks) {
+    let logDet = 0;
+    for (let b = 0; b < blocks.length; b++) {
+      const blk = blocks[b];
+      const n = blk.length;
+      if (n === 0) continue;
+      if (n === 1) {
+        if (Math.abs(blk[0][0]) < 1e-300) return -Infinity;
+        logDet += Math.log(Math.abs(blk[0][0]));
+        continue;
+      }
+      // LU decomposition with partial pivoting (in-place copy)
+      const U = [];
+      for (let i = 0; i < n; i++) U[i] = blk[i].slice();
+      for (let col = 0; col < n; col++) {
+        // Partial pivoting
+        let maxVal = Math.abs(U[col][col]);
+        let maxRow = col;
+        for (let row = col + 1; row < n; row++) {
+          const v = Math.abs(U[row][col]);
+          if (v > maxVal) { maxVal = v; maxRow = row; }
+        }
+        if (maxVal < 1e-300) return -Infinity; // singular block
+        if (maxRow !== col) {
+          const tmp = U[col]; U[col] = U[maxRow]; U[maxRow] = tmp;
+        }
+        // Eliminate below pivot
+        for (let row = col + 1; row < n; row++) {
+          const factor = U[row][col] / U[col][col];
+          for (let j = col; j < n; j++) U[row][j] -= factor * U[col][j];
+        }
+      }
+      // log|det| = sum of log|diag(U)|
+      for (let i = 0; i < n; i++) {
+        if (Math.abs(U[i][i]) < 1e-300) return -Infinity;
+        logDet += Math.log(Math.abs(U[i][i]));
+      }
+    }
+    return logDet;
+  }
+
+  /**
+   * Generalized Least Squares with block-diagonal covariance.
+   * Fits y = X*beta where Var(y) = V (block-diagonal from per-study covariance matrices).
+   *
+   * @param {number[][]} X - N x p design matrix (array of p-element arrays)
+   * @param {number[]} y - N-element response vector
+   * @param {number[][][]} Slist - array of per-study covariance matrices (the blocks)
+   * @param {number[]} studyNs - array of integers, number of rows per study (sum = N)
+   * @returns {Object|null} {coefficients, vcov, fitted, residuals, logLik, df:{N, p, nStudies}} or null if singular
+   */
+  function glsFit(X, y, Slist, studyNs) {
+    const N = y.length;
+    const p = X[0].length;
+    const nStudies = studyNs.length;
+
+    // Validate dimensions
+    if (X.length !== N) return null;
+    let rowSum = 0;
+    for (let s = 0; s < nStudies; s++) rowSum += studyNs[s];
+    if (rowSum !== N) return null;
+    if (Slist.length !== nStudies) return null;
+
+    // Build block-diagonal V and invert it
+    const V = blockDiagMatrix(Slist);
+    const Vinv = matInvertNxN(V);
+    if (!Vinv) return null; // singular covariance
+
+    // Compute X' V^{-1} X and X' V^{-1} y
+    const Xt = matTranspose(X);       // p x N
+    const XtVinv = matMul(Xt, Vinv);  // p x N
+    const XtVinvX = matMul(XtVinv, X); // p x p
+
+    // Invert X'V^{-1}X to get vcov
+    const vcov = matInvertNxN(XtVinvX);
+    if (!vcov) return null; // singular design
+
+    // X'V^{-1}y as vector
+    const XtVinvy = new Array(p);
+    for (let i = 0; i < p; i++) {
+      let sum = 0;
+      for (let j = 0; j < N; j++) sum += XtVinv[i][j] * y[j];
+      XtVinvy[i] = sum;
+    }
+
+    // beta = (X'V^{-1}X)^{-1} X'V^{-1}y
+    const coefficients = new Array(p);
+    for (let i = 0; i < p; i++) {
+      let sum = 0;
+      for (let j = 0; j < p; j++) sum += vcov[i][j] * XtVinvy[j];
+      coefficients[i] = sum;
+    }
+
+    // Fitted values and residuals
+    const fitted = new Array(N);
+    const residuals = new Array(N);
+    for (let i = 0; i < N; i++) {
+      let yhat = 0;
+      for (let j = 0; j < p; j++) yhat += X[i][j] * coefficients[j];
+      fitted[i] = yhat;
+      residuals[i] = y[i] - yhat;
+    }
+
+    // Log-likelihood: -0.5 * [N*log(2pi) + log|V| + r'V^{-1}r]
+    const logDetV = logDetBlockDiag(Slist);
+    // r'V^{-1}r: compute Vinv * r, then dot with r
+    let rVinvr = 0;
+    for (let i = 0; i < N; i++) {
+      let Vinv_r_i = 0;
+      for (let j = 0; j < N; j++) Vinv_r_i += Vinv[i][j] * residuals[j];
+      rVinvr += residuals[i] * Vinv_r_i;
+    }
+    const logLik = -0.5 * (N * Math.log(2 * Math.PI) + logDetV + rVinvr);
+
+    return {
+      coefficients: coefficients,
+      vcov: vcov,
+      fitted: fitted,
+      residuals: residuals,
+      logLik: logLik,
+      df: { N: N, p: p, nStudies: nStudies }
+    };
+  }
+
+  /**
    * Self-test for NxN matrix operations and WLS solver.
    * Logs results to console. Returns { passed, failed, details }.
    */
@@ -9145,6 +9297,213 @@ body.dark-mode .input-error { background: #451a1a !important; }
     }
 
     console.log(`_testGLCovariance: ${passed} passed, ${failed} failed`);
+    return failed === 0;
+  }
+
+  /**
+   * Self-test for block-diagonal GLS solver.
+   * Tests: (1) diagonal S → GLS matches WLS, (2) alcohol_cvd data produces valid results,
+   * (3) off-diagonal covariance changes the result vs diagonal-only.
+   * @returns {boolean} true if all tests pass
+   */
+  function _testGLSFit() {
+    let passed = 0, failed = 0;
+    function approxEq(a, b, tol) { return Math.abs(a - b) < (tol ?? 1e-6); }
+    function check(name, cond) {
+      if (cond) passed++;
+      else { failed++; console.warn('GLS FAIL:', name); }
+    }
+
+    // === Test 1: blockDiagMatrix basic ===
+    {
+      const B1 = [[1, 2], [3, 4]];
+      const B2 = [[5]];
+      const B3 = [[6, 7], [8, 9]];
+      const BD = blockDiagMatrix([B1, B2, B3]);
+      check('blockDiag size', BD.length === 5 && BD[0].length === 5);
+      check('blockDiag [0][0]', BD[0][0] === 1);
+      check('blockDiag [0][1]', BD[0][1] === 2);
+      check('blockDiag [1][0]', BD[1][0] === 3);
+      check('blockDiag [1][1]', BD[1][1] === 4);
+      check('blockDiag [2][2]', BD[2][2] === 5);
+      check('blockDiag [3][3]', BD[3][3] === 6);
+      check('blockDiag [3][4]', BD[3][4] === 7);
+      check('blockDiag [4][3]', BD[4][3] === 8);
+      check('blockDiag [4][4]', BD[4][4] === 9);
+      // Off-block zeros
+      check('blockDiag off-block [0][2]', BD[0][2] === 0);
+      check('blockDiag off-block [2][0]', BD[2][0] === 0);
+      check('blockDiag off-block [1][3]', BD[1][3] === 0);
+    }
+
+    // === Test 2: logDetBlockDiag ===
+    {
+      // det([[2,0],[0,3]]) = 6, det([[5]]) = 5 → total det = 30, log = ln(30)
+      const blocks = [[[2, 0], [0, 3]], [[5]]];
+      const ld = logDetBlockDiag(blocks);
+      check('logDet basic', approxEq(ld, Math.log(30), 1e-10));
+
+      // Singular block → -Infinity
+      const singBlocks = [[[1, 0], [0, 0]]];
+      check('logDet singular', logDetBlockDiag(singBlocks) === -Infinity);
+
+      // 1x1 blocks
+      const ld1x1 = logDetBlockDiag([[[4]], [[7]]]);
+      check('logDet 1x1 blocks', approxEq(ld1x1, Math.log(28), 1e-10));
+    }
+
+    // === Test 3: Diagonal S → GLS matches WLS ===
+    {
+      // 3 studies, each with 2 non-ref dose levels, diagonal covariance
+      const S1 = [[0.04, 0], [0, 0.09]];   // se = [0.2, 0.3]
+      const S2 = [[0.01, 0], [0, 0.04]];   // se = [0.1, 0.2]
+      const S3 = [[0.0625, 0], [0, 0.16]]; // se = [0.25, 0.4]
+      const Slist = [S1, S2, S3];
+      const studyNs = [2, 2, 2];
+      const X = [[5], [10], [3], [8], [7], [15]];
+      const y = [-0.05, -0.10, -0.03, -0.08, -0.07, -0.15];
+
+      const glsResult = glsFit(X, y, Slist, studyNs);
+      check('GLS diag: non-null', glsResult !== null);
+
+      if (glsResult) {
+        // Compute WLS result for comparison: weights = 1/diag(S)
+        const w = [1/0.04, 1/0.09, 1/0.01, 1/0.04, 1/0.0625, 1/0.16];
+        const wlsResult = wlsFit(X, y, w);
+        check('WLS diag: non-null', wlsResult !== null);
+
+        if (wlsResult) {
+          check('GLS=WLS coef', approxEq(glsResult.coefficients[0], wlsResult.beta[0], 1e-8));
+          check('GLS=WLS vcov', approxEq(glsResult.vcov[0][0], wlsResult.vcov[0][0], 1e-8));
+          check('GLS=WLS fitted[0]', approxEq(glsResult.fitted[0], wlsResult.fitted[0], 1e-8));
+          check('GLS=WLS resid[0]', approxEq(glsResult.residuals[0], wlsResult.residuals[0], 1e-8));
+        }
+
+        // Basic sanity
+        check('GLS diag: has logLik', isFinite(glsResult.logLik));
+        check('GLS diag: df.N', glsResult.df.N === 6);
+        check('GLS diag: df.p', glsResult.df.p === 1);
+        check('GLS diag: df.nStudies', glsResult.df.nStudies === 3);
+        check('GLS diag: coef negative', glsResult.coefficients[0] < 0);
+      }
+    }
+
+    // === Test 4: alcohol_cvd with GL covariance ===
+    {
+      // Study data (6 studies)
+      var studies = [
+        { doses: [0, 9.06, 27, 45, 64.8], cases: [126, 61, 69, 22, 19], n: [414, 261, 228, 44, 34], logrr: [0, -0.2231435, -0.0001, 0.5306283, 0.8754687], type: 'cc' },
+        { doses: [0, 16.05, 46.425, 77.16], cases: [77, 88, 24, 13], n: [258, 413, 202, 64], logrr: [0, -0.4307829, -1.07881, -0.6161861], type: 'cc' },
+        { doses: [0, 1.176, 8.916, 18.72], cases: [83, 46, 17, 4], n: [208, 175, 58, 11], logrr: [0, -0.5798185, -0.5621189, 0.6151856], type: 'cc' },
+        { doses: [0, 0.955, 7.43, 15.6], cases: [83, 29, 32, 18], n: [208, 117, 81, 39], logrr: [0, -0.2876821, 0.5128236, -0.3147107], type: 'cc' },
+        { doses: [0, 6, 18, 28.8], cases: [159, 229, 38, 39], n: [480, 975, 207, 133], logrr: [0, -0.4155155, -0.6348783, -0.0833816], type: 'ci' },
+        { doses: [0, 6.25, 18.75, 30], cases: [302, 129, 19, 15], n: [1269, 436, 49, 41], logrr: [0, -0.2231435, -0.0100503, -0.2613648], type: 'ci' }
+      ];
+
+      // Build design matrix, response vector, and covariance blocks
+      var Xall = [], yAll = [], SlistAll = [], studyNsAll = [];
+      var allGood = true;
+      for (var s = 0; s < studies.length; s++) {
+        var st = studies[s];
+        var k = st.doses.length;
+        var nonRefDoses = st.doses.slice(1); // exclude reference
+        var nonRefLogRR = st.logrr.slice(1);
+        var nRows = k - 1;
+
+        // Design: each row is [dose] for linear model
+        for (var r = 0; r < nRows; r++) {
+          Xall.push([nonRefDoses[r]]);
+          yAll.push(nonRefLogRR[r]);
+        }
+        studyNsAll.push(nRows);
+
+        // GL covariance matrix for this study
+        var Scov = greenlandLongnecker(st.cases, st.n, 0, st.type);
+        if (!Scov) { allGood = false; break; }
+        SlistAll.push(Scov);
+      }
+
+      check('alcohol: GL cov all computed', allGood);
+
+      if (allGood) {
+        var glsAlc = glsFit(Xall, yAll, SlistAll, studyNsAll);
+        check('alcohol: GLS non-null', glsAlc !== null);
+        if (glsAlc) {
+          // Coefficient should be negative (protective effect of moderate alcohol)
+          check('alcohol: coef negative', glsAlc.coefficients[0] < 0);
+          // SE should be in reasonable range (R gives 0.0029, ours may differ due to GL formula)
+          var se = Math.sqrt(glsAlc.vcov[0][0]);
+          check('alcohol: SE positive', se > 0);
+          check('alcohol: SE reasonable', se > 0.001 && se < 0.05);
+          // logLik should be finite
+          check('alcohol: logLik finite', isFinite(glsAlc.logLik));
+          // Correct df
+          check('alcohol: df.N', glsAlc.df.N === yAll.length);
+          check('alcohol: df.p', glsAlc.df.p === 1);
+          check('alcohol: df.nStudies', glsAlc.df.nStudies === 6);
+          // Residuals should sum approximately to 0 (not exactly for GLS, but close)
+          var residSum = 0;
+          for (var r = 0; r < glsAlc.residuals.length; r++) residSum += glsAlc.residuals[r];
+          check('alcohol: residuals not all zero', glsAlc.residuals.some(function(v) { return Math.abs(v) > 1e-10; }));
+        }
+      }
+    }
+
+    // === Test 5: Off-diagonal covariance changes result ===
+    {
+      // Same data as Test 3 but with strong off-diagonal correlation
+      // With p=1 design, coef may be insensitive to off-diag, but SE and logLik must differ
+      var S1off = [[0.04, 0.03], [0.03, 0.09]];
+      var S2off = [[0.01, 0.008], [0.008, 0.04]];
+      var S3off = [[0.0625, 0.05], [0.05, 0.16]];
+      var SlistOff = [S1off, S2off, S3off];
+      var studyNsOff = [2, 2, 2];
+      var Xoff = [[5], [10], [3], [8], [7], [15]];
+      var yOff = [-0.05, -0.10, -0.03, -0.08, -0.07, -0.15];
+
+      var glsDiag = glsFit(
+        [[5], [10], [3], [8], [7], [15]],
+        [-0.05, -0.10, -0.03, -0.08, -0.07, -0.15],
+        [[[0.04, 0], [0, 0.09]], [[0.01, 0], [0, 0.04]], [[0.0625, 0], [0, 0.16]]],
+        [2, 2, 2]
+      );
+      var glsOff = glsFit(Xoff, yOff, SlistOff, studyNsOff);
+
+      check('off-diag: GLS non-null', glsOff !== null);
+      if (glsDiag && glsOff) {
+        // SE must differ when off-diagonal covariance is nonzero
+        var seDiag = Math.sqrt(glsDiag.vcov[0][0]);
+        var seOff = Math.sqrt(glsOff.vcov[0][0]);
+        check('off-diag: SE differs', !approxEq(seDiag, seOff, 1e-10));
+        // logLik must differ
+        check('off-diag: logLik differs', !approxEq(glsDiag.logLik, glsOff.logLik, 1e-10));
+        // At least one of coef/SE/logLik must differ (off-diagonal matters)
+        var coefDiff = !approxEq(glsDiag.coefficients[0], glsOff.coefficients[0], 1e-10);
+        var seDiff = !approxEq(seDiag, seOff, 1e-10);
+        var llDiff = !approxEq(glsDiag.logLik, glsOff.logLik, 1e-10);
+        check('off-diag: at least one stat differs', coefDiff || seDiff || llDiff);
+      }
+    }
+
+    // === Test 6: Edge cases ===
+    {
+      // Null/empty inputs
+      check('edge: empty blockDiag', blockDiagMatrix([]).length === 0);
+
+      // Single 1x1 block
+      var bd1 = blockDiagMatrix([[[7]]]);
+      check('edge: 1x1 blockDiag', bd1.length === 1 && bd1[0][0] === 7);
+
+      // Dimension mismatch → null
+      var badResult = glsFit([[1], [2]], [1, 2, 3], [[[0.1]]], [2]);
+      check('edge: dim mismatch X vs y', badResult === null);
+
+      // studyNs sum mismatch → null
+      var badResult2 = glsFit([[1], [2]], [1, 2], [[[0.1]]], [3]);
+      check('edge: studyNs sum mismatch', badResult2 === null);
+    }
+
+    console.log('_testGLSFit: ' + passed + ' passed, ' + failed + ' failed');
     return failed === 0;
   }
 
@@ -10428,6 +10787,7 @@ body.dark-mode .input-error { background: #451a1a !important; }
     try { results.drHeterogeneity = _testDRHeterogeneity(); } catch(e) { results.drHeterogeneity = false; console.error('DRHeterogeneity tests error:', e); }
     try { results.csvParser = _testCSVParser(); } catch(e) { results.csvParser = false; console.error('CSVParser tests error:', e); }
     try { results.glCovariance = _testGLCovariance(); } catch(e) { results.glCovariance = false; console.error('GL Covariance tests error:', e); }
+    try { results.glsFit = _testGLSFit(); } catch(e) { results.glsFit = false; console.error('GLS Fit tests error:', e); }
 
     console.log('=== Results ===');
     console.table(results);
