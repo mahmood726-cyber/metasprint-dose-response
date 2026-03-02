@@ -88,7 +88,8 @@ class TestUIElements:
         assert 'loglinear' in options
         assert 'exponential' in options
         assert 'hill' in options
-        assert len(options) == 11
+        assert 'averaged' in options
+        assert len(options) == 12
 
     def test_one_stage_toggle_exists(self, driver):
         el = driver.find_element(By.ID, 'drOneStageToggle')

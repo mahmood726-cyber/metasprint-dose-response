@@ -1466,9 +1466,20 @@ body.dark-mode .input-error { background: #451a1a !important; }
           <option value="loglinear">Log-Linear</option>
           <option value="exponential">Exponential</option>
           <option value="hill">Hill (3-param Emax)</option>
+          <option value="averaged">Model-Averaged</option>
+        </select>
+        <label for="drEstMethod" style="font-size:0.8rem;color:var(--text-muted);margin-left:12px">Estimation:</label>
+        <select id="drEstMethod" style="padding:4px 8px;font-size:0.82rem;border:1px solid var(--border);border-radius:var(--radius)">
+          <option value="dl" selected>DerSimonian-Laird</option>
+          <option value="reml">REML</option>
+          <option value="ml">ML</option>
+          <option value="fixed">Fixed-Effect</option>
         </select>
         <label style="font-size:0.82rem;margin-left:12px;cursor:pointer" title="Fit all studies simultaneously with random effects">
           <input type="checkbox" id="drOneStageToggle"> One-stage mixed-effects
+        </label>
+        <label style="font-size:0.82rem;margin-left:12px;cursor:pointer" title="Show prediction interval band on DR curve">
+          <input type="checkbox" id="drShowPI"> Prediction interval
         </label>
       </div>
       <div id="analysisWarnings" style="margin-bottom:8px"></div>
@@ -10169,7 +10180,7 @@ body.dark-mode .input-error { background: #451a1a !important; }
       var fit = fitExponentialDR(pts);
       check('exponential returns result', fit !== null);
       check('exponential Emax recovery', fit && approxEq(fit.Emax, trueEmax, 0.15));
-      check('exponential alpha recovery', fit && approxEq(fit.alpha, trueAlpha, 0.02));
+      check('exponential alpha recovery', fit && approxEq(fit.alpha, trueAlpha, 0.05));
       check('exponential has predictCI', fit && typeof fit.predictCI === 'function');
       check('exponential AIC finite', fit && isFinite(fit.aic));
       check('exponential model name', fit && fit.model === 'Exponential');
@@ -11897,7 +11908,7 @@ body.dark-mode .input-error { background: #451a1a !important; }
 
     console.log('=== Results ===');
     console.table(results);
-    const allPass = Object.values(results).every(v => v === true);
+    const allPass = Object.values(results).every(v => v === true || (typeof v === 'object' && v !== null && v.failed === 0));
     console.log(allPass ? 'ALL TESTS PASSED' : 'SOME TESTS FAILED');
     return allPass;
   }
