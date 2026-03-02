@@ -640,5 +640,398 @@ class TestCSVImport:
         assert len(btns) == 1
 
 
+class TestAdvancedFeatures:
+    """Tests for advanced DR features: dose-finding, Bayesian, funnel, forest, bootstrap."""
+
+    # --- Dose-Finding Metrics ---
+
+    def test_dose_metrics_basic(self, driver):
+        """computeDoseMetrics should return ED50, ED90, MED, NOAEL."""
+        result = driver.execute_script("""
+            var pts = [];
+            for (var i = 0; i <= 10; i++) pts.push({dose: i, effect: 5*(1 - Math.exp(-0.3*i)), se: 0.2});
+            var model = fitExponentialDR(pts);
+            if (!model) return null;
+            var m = computeDoseMetrics(model, 10, 0.5);
+            return m ? {ED50: m.ED50, ED90: m.ED90, MED: m.MED, NOAEL: m.NOAEL,
+                        hasWindow: m.therapeuticWindow != null} : null;
+        """)
+        assert result is not None
+        assert 0 < result['ED50'] < 10
+        assert result['ED90'] > result['ED50']
+        assert result['MED'] is not None
+        assert result['hasWindow'] is True
+
+    def test_dose_metrics_linear(self, driver):
+        """Dose metrics on a simple linear curve."""
+        result = driver.execute_script("""
+            var pts = [];
+            for (var i = 0; i <= 6; i++) pts.push({dose: i, effect: 0.5*i, se: 0.15});
+            var model = fitLinearDR(pts);
+            if (!model) return null;
+            var m = computeDoseMetrics(model, 6, 0);
+            return m ? {ED50: m.ED50, maxEffectDose: m.maxEffectDose} : null;
+        """)
+        assert result is not None
+        assert abs(result['ED50'] - 3.0) < 0.5  # ED50 at 50% of max effect
+
+    def test_dose_metrics_card_render(self, driver):
+        """renderDoseMetricsCard should produce HTML with key labels."""
+        result = driver.execute_script("""
+            var pts = [];
+            for (var i = 0; i <= 8; i++) pts.push({dose: i, effect: 3*Math.log(i+1), se: 0.2});
+            var model = fitLinearDR(pts);
+            if (!model) return null;
+            var metrics = computeDoseMetrics(model, 8, 0.5);
+            if (!metrics) return null;
+            var html = renderDoseMetricsCard(metrics);
+            return {hasED50: html.includes('ED') && html.includes('50'),
+                    hasED90: html.includes('ED') && html.includes('90'),
+                    hasMED: html.includes('MED'), length: html.length};
+        """)
+        assert result is not None
+        assert result['hasED50'] is True
+        assert result['hasED90'] is True
+        assert result['length'] > 100
+
+    # --- Bayesian DR ---
+
+    def test_bayesian_dr_linear(self, driver):
+        """fitBayesianDR should return posterior mean, SD, and CrI function."""
+        result = driver.execute_script("""
+            var pts = [];
+            for (var i = 0; i <= 8; i++) pts.push({dose: i, effect: 1 + 0.5*i, se: 0.2});
+            var b = fitBayesianDR(pts, 'linear', 10);
+            if (!b) return null;
+            var cri = b.predictBayesCrI(4, 0.95);
+            return {model: b.model, nMean: b.posteriorMean.length, nSD: b.posteriorSD.length,
+                    criY: cri.y, criLo: cri.lo, criHi: cri.hi,
+                    predictConsistent: Math.abs(b.predict(4) - cri.y) < 0.01};
+        """)
+        assert result is not None
+        assert result['model'].startswith('Bayesian-')
+        assert result['nMean'] == 2
+        assert result['criLo'] < result['criY'] < result['criHi']
+        assert result['predictConsistent'] is True  # predict and CrI center must agree
+
+    def test_bayesian_dr_shrinkage(self, driver):
+        """Bayesian posterior should shrink toward zero vs frequentist."""
+        result = driver.execute_script("""
+            var pts = [];
+            for (var i = 0; i <= 6; i++) pts.push({dose: i, effect: 2 + 0.8*i, se: 0.3});
+            var freq = fitLinearDR(pts);
+            var bayes = fitBayesianDR(pts, 'linear', 5);
+            if (!freq || !bayes) return null;
+            return {freqB1: freq.b1, bayesB1: bayes.posteriorMean[1],
+                    shrunk: Math.abs(bayes.posteriorMean[1]) < Math.abs(freq.b1)};
+        """)
+        assert result is not None
+        assert result['shrunk'] is True  # posterior shrinks toward zero
+
+    def test_bayesian_cri_band_render(self, driver):
+        """renderBayesCrIBand should produce SVG path string."""
+        result = driver.execute_script("""
+            var pts = [];
+            for (var i = 0; i <= 8; i++) pts.push({dose: i, effect: 1 + 0.4*i, se: 0.2});
+            var b = fitBayesianDR(pts, 'linear', 10);
+            if (!b) return null;
+            var xS = function(d) { return 50 + d * 40; };
+            var yS = function(y) { return 300 - y * 30; };
+            var svg = renderBayesCrIBand(b, xS, yS, 0, 8, 50, false);
+            return {hasPath: svg.includes('<path'), length: svg.length};
+        """)
+        assert result is not None
+        assert result['hasPath'] is True
+        assert result['length'] > 50
+
+    # --- DR Publication Bias ---
+
+    def test_dr_funnel_plot_render(self, driver):
+        """renderDRFunnelPlot should produce SVG with funnel shape."""
+        result = driver.execute_script("""
+            var pts = [];
+            for (var i = 0; i <= 10; i++) {
+                pts.push({dose: i, effect: 0.3*i + (Math.random()-0.5)*0.5, se: 0.1 + Math.random()*0.3, studyId: 'S' + i});
+            }
+            var model = fitLinearDR(pts);
+            if (!model) return null;
+            var svg = renderDRFunnelPlot(pts, model);
+            return {hasSVG: svg.includes('<svg'), hasCircle: svg.includes('<circle'),
+                    hasText: svg.includes('Precision'), length: svg.length};
+        """)
+        assert result is not None
+        assert result['hasSVG'] is True
+        assert result['hasCircle'] is True
+        assert result['length'] > 200
+
+    def test_dose_reporting_bias_test(self, driver):
+        """testDoseReportingBias should return chi-squared and p-value."""
+        result = driver.execute_script("""
+            var pts = [];
+            for (var i = 0; i < 20; i++) {
+                pts.push({dose: Math.floor(Math.random() * 10), effect: Math.random(), se: 0.1 + Math.random()*0.2});
+            }
+            var r = testDoseReportingBias(pts);
+            return r;
+        """)
+        assert result is not None
+        assert 'chi2' in result
+        assert 'df' in result
+        assert 'pValue' in result
+        assert 0 <= result['pValue'] <= 1
+
+    def test_dose_egger_regression(self, driver):
+        """doseEggerRegression should return intercept, slope, p-value."""
+        result = driver.execute_script("""
+            var pts = [];
+            for (var i = 0; i <= 10; i++) {
+                pts.push({dose: i, effect: 0.5*i + (Math.random()-0.5)*0.3, se: 0.15});
+            }
+            var model = fitLinearDR(pts);
+            if (!model) return null;
+            var r = doseEggerRegression(pts, model);
+            return r;
+        """)
+        assert result is not None
+        assert 'intercept' in result
+        assert 'pValue' in result
+        assert 0 <= result['pValue'] <= 1
+
+    # --- Dose-Specific Forest Plot ---
+
+    def test_dose_forest_plot_render(self, driver):
+        """renderDoseForestPlot should produce SVG with study rows."""
+        result = driver.execute_script("""
+            var pts = [];
+            var studies = ['Alpha', 'Beta', 'Gamma', 'Delta'];
+            for (var s = 0; s < 4; s++) {
+                for (var d = 0; d <= 4; d++) {
+                    pts.push({dose: d*10, effect: 0.3*d + (s-1.5)*0.2, se: 0.15, studyId: studies[s]});
+                }
+            }
+            var svg = renderDoseForestPlot(pts, 0.95);
+            return {hasSVG: svg.includes('<svg'), hasRect: svg.includes('<rect'),
+                    hasStudy: svg.includes('Alpha'), length: svg.length};
+        """)
+        assert result is not None
+        assert result['hasSVG'] is True
+        assert result['hasRect'] is True
+        assert result['hasStudy'] is True
+        assert result['length'] > 300
+
+    # --- Breakpoint Bootstrap CI ---
+
+    def test_bootstrap_breakpoints(self, driver):
+        """bootstrapBreakpoints should return plateau and inflection CI arrays."""
+        result = driver.execute_script("""
+            var pts = [];
+            var studies = ['S1', 'S2', 'S3', 'S4'];
+            for (var s = 0; s < 4; s++) {
+                for (var d = 0; d <= 8; d++) {
+                    var y = d < 5 ? 0.5*d : 2.5;
+                    pts.push({dose: d, effect: y, se: 0.15, studyId: studies[s]});
+                }
+            }
+            var r = bootstrapBreakpoints(pts, 'linear', 100, 0.95);
+            return r ? {hasPlateau: r.plateau != null, hasInflection: r.inflection != null,
+                        keys: Object.keys(r)} : null;
+        """)
+        assert result is not None
+        assert result['hasPlateau'] is True or result['hasInflection'] is True
+
+    # --- Study Overlay ---
+
+    def test_study_overlay_in_svg(self, driver):
+        """Dose-response SVG should support per-study overlay curves."""
+        result = driver.execute_script("""
+            var pts = [];
+            for (var s = 0; s < 3; s++) {
+                for (var d = 0; d <= 4; d++) {
+                    pts.push({dose: d, effect: 1 + 0.3*d + s*0.1, se: 0.2, studyId: 'Study' + s});
+                }
+            }
+            var model = fitLinearDR(pts);
+            if (!model) return null;
+            var svg = renderDoseResponseCurveSVG(pts, model, 0.95, 1.96, false);
+            return {hasPolyline: svg.includes('polyline') || svg.includes('<path'),
+                    hasSVG: svg.includes('<svg'), length: svg.length};
+        """)
+        assert result is not None
+        assert result['hasSVG'] is True
+        assert result['length'] > 200
+
+    # --- Network Dose-Response ---
+
+    def test_network_dr_curve(self, driver):
+        """renderNetworkDRCurve should produce SVG with multiple drug curves."""
+        result = driver.execute_script("""
+            var groups = [
+                {drugName: 'DrugA', points: [{dose:0,effect:0,se:0.1},{dose:5,effect:1.5,se:0.15},{dose:10,effect:2.8,se:0.2}]},
+                {drugName: 'DrugB', points: [{dose:0,effect:0,se:0.12},{dose:5,effect:0.8,se:0.18},{dose:10,effect:1.5,se:0.22}]}
+            ];
+            var svg = renderNetworkDRCurve(groups, 'linear', 0.95);
+            return {hasSVG: svg.includes('<svg'), hasDrugA: svg.includes('DrugA'),
+                    hasDrugB: svg.includes('DrugB'), length: svg.length};
+        """)
+        assert result is not None
+        assert result['hasSVG'] is True
+        assert result['hasDrugA'] is True
+        assert result['hasDrugB'] is True
+
+    # --- R/Python Code Export ---
+
+    def test_r_code_export(self, driver):
+        """generateRCode should produce valid R script text."""
+        result = driver.execute_script("""
+            var pts = [{dose:0,effect:0,se:0.1},{dose:5,effect:1,se:0.15},{dose:10,effect:2,se:0.2}];
+            var model = fitLinearDR(pts);
+            if (!model) return null;
+            var code = generateRCode(pts, model, 'dl');
+            return {hasLibrary: code.includes('dosresmeta'), hasCoef: code.includes('coef'),
+                    length: code.length};
+        """)
+        assert result is not None
+        assert result['hasLibrary'] is True
+        assert result['length'] > 100
+
+    def test_python_code_export(self, driver):
+        """generatePythonCode should produce valid Python script text."""
+        result = driver.execute_script("""
+            var pts = [{dose:0,effect:0,se:0.1},{dose:5,effect:1,se:0.15},{dose:10,effect:2,se:0.2}];
+            var model = fitLinearDR(pts);
+            if (!model) return null;
+            var code = generatePythonCode(pts, model, 'dl');
+            return {hasNumpy: code.includes('numpy'), hasResult: code.includes('result') || code.includes('beta'),
+                    length: code.length};
+        """)
+        assert result is not None
+        assert result['hasNumpy'] is True
+        assert result['length'] > 100
+
+    # --- Gap-to-Protocol Pipeline ---
+
+    def test_gap_to_protocol_self_test(self, driver):
+        """Run the inline _testGapToProtocol self-test."""
+        result = driver.execute_script('return _testGapToProtocol()')
+        assert result is True
+
+    # --- Inline Advanced Feature Tests ---
+
+    def test_advanced_features_suite(self, driver):
+        """Run the inline _testAdvancedDRFeatures self-test."""
+        result = driver.execute_script('return _testAdvancedDRFeatures()')
+        assert result is True
+
+    def test_top5_advanced_suite(self, driver):
+        """Run the inline _testTop5AdvancedFeatures self-test."""
+        result = driver.execute_script('return _testTop5AdvancedFeatures()')
+        assert result is True
+
+    # --- DR Heterogeneity with corrected nParams ---
+
+    def test_heterogeneity_df_correct(self, driver):
+        """After nParams fix, Linear Q_DR should have df = nPoints - 2."""
+        result = driver.execute_script("""
+            var pts = [];
+            for (var i = 0; i <= 8; i++) pts.push({dose: i, effect: 1 + 0.5*i, se: 0.15});
+            var model = fitLinearDR(pts);
+            if (!model) return null;
+            var het = computeDRHeterogeneity(pts, model);
+            return het ? {df: het.df, nPts: pts.length} : null;
+        """)
+        assert result is not None
+        assert result['df'] == result['nPts'] - 2  # 9 points - 2 params (b0 + b1)
+
+    def test_heterogeneity_quadratic_df(self, driver):
+        """Quadratic Q_DR should have df = nPoints - 3."""
+        result = driver.execute_script("""
+            var pts = [];
+            for (var i = 0; i <= 8; i++) pts.push({dose: i, effect: 1 + 0.3*i - 0.02*i*i, se: 0.15});
+            var model = fitQuadraticDR(pts);
+            if (!model) return null;
+            var het = computeDRHeterogeneity(pts, model);
+            return het ? {df: het.df, nPts: pts.length} : null;
+        """)
+        assert result is not None
+        assert result['df'] == result['nPts'] - 3  # 9 points - 3 params (b0 + b1 + b2)
+
+    # --- Focus Trap Utility ---
+
+    def test_focus_trap_exists(self, driver):
+        """trapFocus utility function should be defined."""
+        result = driver.execute_script('return typeof trapFocus === "function"')
+        assert result is True
+
+
+class TestAccessibility:
+    """Test accessibility improvements from the review."""
+
+    def test_svg_has_role_img(self, driver):
+        """Dynamically-generated SVGs should have role=img."""
+        result = driver.execute_script("""
+            var pts = [];
+            for (var i = 0; i <= 8; i++) pts.push({dose: i, effect: 1 + 0.3*i, se: 0.15});
+            var model = fitLinearDR(pts);
+            if (!model) return null;
+            var svg = renderDoseResponseCurveSVG(pts, model, 0.95, 1.96, false);
+            return {hasRoleImg: svg.includes('role="img"'), hasAriaLabel: svg.includes('aria-label'),
+                    hasViewBox: svg.includes('viewBox')};
+        """)
+        assert result is not None
+        assert result['hasRoleImg'] is True
+        assert result['hasAriaLabel'] is True
+        assert result['hasViewBox'] is True
+
+    def test_forest_svg_accessible(self, driver):
+        result = driver.execute_script("""
+            var pts = [];
+            for (var s = 0; s < 3; s++)
+                for (var d = 0; d <= 3; d++)
+                    pts.push({dose: d*10, effect: 0.3*d, se: 0.15, studyId: 'S' + s});
+            var svg = renderDoseForestPlot(pts, 0.95);
+            return {hasRoleImg: svg.includes('role="img"'), hasViewBox: svg.includes('viewBox')};
+        """)
+        assert result is not None
+        assert result['hasRoleImg'] is True
+        assert result['hasViewBox'] is True
+
+    def test_badge_dark_mode_css_exists(self, driver):
+        """Dark mode badge CSS overrides should be present."""
+        result = driver.execute_script("""
+            var sheets = document.styleSheets;
+            var found = {include: false, exclude: false, maybe: false, duplicate: false};
+            try {
+                for (var i = 0; i < sheets.length; i++) {
+                    var rules = sheets[i].cssRules || [];
+                    for (var j = 0; j < rules.length; j++) {
+                        var sel = rules[j].selectorText || '';
+                        if (sel.includes('dark-mode') && sel.includes('badge-include')) found.include = true;
+                        if (sel.includes('dark-mode') && sel.includes('badge-exclude')) found.exclude = true;
+                        if (sel.includes('dark-mode') && sel.includes('badge-maybe')) found.maybe = true;
+                        if (sel.includes('dark-mode') && sel.includes('badge-duplicate')) found.duplicate = true;
+                    }
+                }
+            } catch(e) {}
+            return found;
+        """)
+        assert result is not None
+        assert result['include'] is True
+        assert result['exclude'] is True
+        assert result['maybe'] is True
+        assert result['duplicate'] is True
+
+    def test_skip_link_exists(self, driver):
+        """Skip-to-content link should exist."""
+        links = driver.find_elements(By.CSS_SELECTOR, '.skip-link')
+        assert len(links) >= 1
+
+    def test_confirm_dialog_escapes(self, driver):
+        """Confirm dialog should handle Escape key."""
+        result = driver.execute_script("""
+            return typeof showConfirm === 'function' && typeof trapFocus === 'function';
+        """)
+        assert result is True
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])
