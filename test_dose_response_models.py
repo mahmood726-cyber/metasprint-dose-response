@@ -421,6 +421,181 @@ class TestDRUniverse:
         assert result['hasDRCount'] is True
 
 
+class TestExceedDosresmeta:
+    """Tests for features that exceed dosresmeta2: GL covariance, GLS, ML/REML,
+    new models, prediction intervals, model averaging, R cross-validation."""
+
+    # --- UI elements ---
+
+    def test_estimation_method_selector_exists(self, driver):
+        select = Select(driver.find_element(By.ID, 'drEstMethod'))
+        opts = [o.get_attribute('value') for o in select.options]
+        assert 'dl' in opts
+        assert 'reml' in opts
+        assert 'ml' in opts
+        assert 'fixed' in opts
+        assert len(opts) == 4
+
+    def test_prediction_interval_checkbox_exists(self, driver):
+        el = driver.find_element(By.ID, 'drShowPI')
+        assert el.get_attribute('type') == 'checkbox'
+
+    def test_model_selector_has_new_models(self, driver):
+        select = Select(driver.find_element(By.ID, 'drModelSelect'))
+        opts = [o.get_attribute('value') for o in select.options]
+        assert 'loglinear' in opts
+        assert 'exponential' in opts
+        assert 'hill' in opts
+        assert 'averaged' in opts
+
+    # --- Inline test suites ---
+
+    def test_gl_covariance_suite(self, driver):
+        result = driver.execute_script('return _testGLCovariance()')
+        assert result is True
+
+    def test_gls_fit_suite(self, driver):
+        result = driver.execute_script('return _testGLSFit()')
+        assert result is True
+
+    def test_ml_reml_suite(self, driver):
+        result = driver.execute_script('return _testMLREML()')
+        assert result is True
+
+    def test_new_models_suite(self, driver):
+        result = driver.execute_script('return _testNewModels()')
+        assert result is True
+
+    def test_one_stage_all_models_suite(self, driver):
+        result = driver.execute_script('return _testOneStageAllModels()')
+        assert result is True
+
+    def test_prediction_interval_suite(self, driver):
+        result = driver.execute_script('return _testPredictionInterval()')
+        assert result is True
+
+    def test_model_averaging_suite(self, driver):
+        result = driver.execute_script('return _testModelAveraging()')
+        assert result is True
+
+    def test_r_validation_suite(self, driver):
+        result = driver.execute_script('return _testVsR()')
+        assert result is True
+
+    # --- Full test runner ---
+
+    def test_all_dr_tests_pass(self, driver):
+        result = driver.execute_script('return _runAllDRTests()')
+        assert result is True, '_runAllDRTests returned False — at least one suite failed'
+
+    # --- Functional tests for new models ---
+
+    def test_loglinear_model_fit(self, driver):
+        result = driver.execute_script("""
+            var pts = [];
+            for (var i = 1; i <= 8; i++) pts.push({dose: i, effect: 2*Math.log(i+1), se: 0.15});
+            var m = fitLogLinearDR(pts);
+            return m ? {model: m.model, R2: m.R2, b1: m.b1} : null;
+        """)
+        assert result is not None
+        assert result['model'] == 'Log-Linear'
+        assert result['R2'] > 0.9
+
+    def test_exponential_model_fit(self, driver):
+        result = driver.execute_script("""
+            var pts = [];
+            for (var i = 0; i <= 10; i++) pts.push({dose: i, effect: 5*(1-Math.exp(-0.3*i)), se: 0.2});
+            var m = fitExponentialDR(pts);
+            return m ? {model: m.model, R2: m.R2, Emax: m.Emax, alpha: m.alpha} : null;
+        """)
+        assert result is not None
+        assert result['model'] == 'Exponential'
+        assert result['R2'] > 0.9
+        assert abs(result['Emax'] - 5.0) < 1.5
+
+    def test_hill_model_fit(self, driver):
+        result = driver.execute_script("""
+            var pts = [];
+            for (var i = 0; i <= 10; i++) {
+                var y = 10 * Math.pow(i, 2) / (Math.pow(5, 2) + Math.pow(i, 2));
+                pts.push({dose: i, effect: y, se: 0.2});
+            }
+            var m = fitHillDR(pts);
+            return m ? {model: m.model, R2: m.R2, Emax: m.Emax, ED50: m.ED50, h: m.h} : null;
+        """)
+        assert result is not None
+        assert result['model'] == 'Hill'
+        assert result['R2'] > 0.95
+        assert abs(result['ED50'] - 5.0) < 2.0
+
+    def test_model_averaged_prediction(self, driver):
+        result = driver.execute_script("""
+            var pts = [];
+            for (var i = 0; i <= 8; i++) pts.push({dose: i, effect: Math.log(i+1)*2, se: 0.2});
+            var comp = compareDoseResponseModels(pts);
+            if (!comp) return null;
+            var curve = computeModelAveragedCurve(comp.all, 8, 0.95, 20);
+            if (!curve || curve.length === 0) return null;
+            return {
+                nPoints: curve.length,
+                firstDose: curve[0].dose,
+                lastDose: curve[curve.length-1].dose,
+                hasCI: curve[0].lo !== undefined && curve[0].hi !== undefined,
+                midPred: curve[Math.floor(curve.length/2)].pred
+            };
+        """)
+        assert result is not None
+        assert result['nPoints'] >= 20  # nPoints may be inclusive (0..nPoints)
+        assert result['firstDose'] == 0
+        assert abs(result['lastDose'] - 8.0) < 0.5
+        assert result['hasCI'] is True
+        assert result['midPred'] > 0
+
+    def test_prediction_interval_computation(self, driver):
+        result = driver.execute_script("""
+            var pi = computePredictionInterval(1.5, 0.3, 0.1, 10, 2, 0.95);
+            return pi;
+        """)
+        assert result is not None
+        assert result['lower'] < 1.5
+        assert result['upper'] > 1.5
+        # PI should be wider than a simple CI (se*1.96)
+        ci_half = 0.3 * 1.96
+        assert (1.5 - result['lower']) > ci_half
+
+    def test_gl_covariance_produces_matrix(self, driver):
+        result = driver.execute_script("""
+            var cov = greenlandLongnecker(
+                [100, 80, 60],  // cases
+                [500, 500, 500], // n
+                0,               // refIdx
+                'ci'             // type
+            );
+            if (!cov) return null;
+            return {rows: cov.length, cols: cov[0].length, isDiagPositive: cov[0][0] > 0 && cov[1][1] > 0};
+        """)
+        assert result is not None
+        assert result['rows'] == 2  # 3 doses minus reference = 2x2
+        assert result['cols'] == 2
+        assert result['isDiagPositive'] is True
+
+    def test_gls_fit_returns_coefficients(self, driver):
+        """GLS fit: Slist[i] must be studyNs[i] x studyNs[i]."""
+        result = driver.execute_script("""
+            var X = [[1, 10], [1, 20], [1, 5], [1, 15]];
+            var y = [-0.1, -0.2, -0.05, -0.15];
+            var S1 = [[0.01, 0.005], [0.005, 0.01]];
+            var S2 = [[0.02, 0.008], [0.008, 0.02]];
+            var Slist = [S1, S2];
+            var studyNs = [2, 2];
+            var fit = glsFit(X, y, Slist, studyNs);
+            return fit ? {nCoef: fit.coefficients.length, hasVcov: fit.vcov.length === 2} : null;
+        """)
+        assert result is not None
+        assert result['nCoef'] == 2
+        assert result['hasVcov'] is True
+
+
 class TestCSVImport:
     """Test CSV import helper functions."""
 
