@@ -8149,6 +8149,27 @@ body.dark-mode .input-error { background: #451a1a !important; }
     }
   }
 
+  /**
+   * Compute prediction interval for a dose-response curve point.
+   * Accounts for both estimation uncertainty (SE) and between-study heterogeneity (tau2).
+   * Uses t-distribution with df = k - p degrees of freedom (Cochrane 2025 convention).
+   * @param {number} yhat - point prediction
+   * @param {number} se - standard error of the prediction
+   * @param {number} tau2 - between-study variance (tau-squared)
+   * @param {number} k - number of studies
+   * @param {number} p - number of model parameters (excluding intercept)
+   * @param {number} [confLevel=0.95] - confidence level
+   * @returns {{lower: number, upper: number, piSE: number}|null}
+   */
+  function computePredictionInterval(yhat, se, tau2, k, p, confLevel) {
+    var df = k - p;
+    if (df <= 0) return null;
+    var alpha = 1 - (confLevel ?? 0.95);
+    var tCrit = tQuantile(1 - alpha / 2, df);
+    var piSE = Math.sqrt(se * se + Math.max(tau2, 0));
+    return { lower: yhat - tCrit * piSE, upper: yhat + tCrit * piSE, piSE: piSE };
+  }
+
   // --- REML tau-squared estimator (EM algorithm, Viechtbauer 2005 Eq.7-9) ---
   // Cochrane RevMan switched from DL to REML as default in January 2025
   function estimateREML(studyData, maxIter, tol) {
@@ -11483,15 +11504,98 @@ body.dark-mode .input-error { background: #451a1a !important; }
   // ═══════════════════════════════════════════════════════════════════════
 
   /**
+   * Build a design-matrix row (without intercept) for a given dose and model type.
+   * Used by one-stage mixed-effects and prediction functions.
+   * @param {number} dose - single dose value
+   * @param {string} modelType - 'linear','quadratic','rcs3','rcs4','loglinear','fp1','fp2'
+   * @param {object} [extraParams] - model-specific parameters:
+   *   - knots: number[] for rcs3/rcs4
+   *   - power: number for fp1
+   *   - power1, power2: numbers for fp2
+   * @returns {number[]} design row (without intercept column)
+   */
+  function buildDesignRow(dose, modelType, extraParams) {
+    var ep = extraParams || {};
+    switch (modelType) {
+      case 'linear':
+        return [dose];
+      case 'quadratic':
+        return [dose, dose * dose];
+      case 'rcs3':
+      case 'rcs4': {
+        var knots = ep.knots;
+        if (!knots || knots.length < 3) return [dose]; // fallback to linear
+        var basis = computeRCSBasis([dose], knots);
+        if (!basis || basis.length === 0) return [dose];
+        return basis[0]; // [linear, spline1, ...spline_{k-2}]
+      }
+      case 'loglinear':
+        return [Math.log(dose + 1e-6)];
+      case 'fp1': {
+        var pw = ep.power ?? 1;
+        var d = dose <= 0 ? 1e-6 : dose;
+        return [fpTransform(d, pw)];
+      }
+      case 'fp2': {
+        var p1 = ep.power1 ?? 1, p2 = ep.power2 ?? 2;
+        var d = dose <= 0 ? 1e-6 : dose;
+        var t1 = fpTransform(d, p1);
+        var t2 = (p1 === p2) ? fpTransform(d, p1) * Math.log(d) : fpTransform(d, p2);
+        return [t1, t2];
+      }
+      default:
+        return [dose]; // fallback linear
+    }
+  }
+
+  /**
+   * Build full design matrix (with intercept) for an array of doses.
+   * @param {number[]} doses
+   * @param {string} modelType
+   * @param {object} [extraParams]
+   * @returns {number[][]} design matrix, each row = [1, ...basis columns]
+   */
+  function buildDesignMatrix(doses, modelType, extraParams) {
+    var X = [];
+    for (var i = 0; i < doses.length; i++) {
+      var row = buildDesignRow(doses[i], modelType, extraParams);
+      X.push([1].concat(row));
+    }
+    return X;
+  }
+
+  /**
+   * Determine the number of fixed-effect columns (including intercept) for a given model type.
+   * @param {string} modelType
+   * @param {object} [extraParams] - must include knots for rcs3/rcs4
+   * @returns {number}
+   */
+  function designMatrixCols(modelType, extraParams) {
+    switch (modelType) {
+      case 'linear': return 2;    // intercept + dose
+      case 'quadratic': return 3; // intercept + dose + dose^2
+      case 'rcs3': return 1 + (extraParams && extraParams.knots ? extraParams.knots.length - 1 : 2); // intercept + (k-1) basis columns
+      case 'rcs4': return 1 + (extraParams && extraParams.knots ? extraParams.knots.length - 1 : 3);
+      case 'loglinear': return 2; // intercept + log(dose)
+      case 'fp1': return 2;       // intercept + dose^p
+      case 'fp2': return 3;       // intercept + dose^p1 + dose^p2
+      default: return 2;          // fallback linear
+    }
+  }
+
+  /**
    * Fit a one-stage mixed-effects dose-response model.
    * Random intercept + random slope (dose) per study.
+   * Supports all linear model types: linear, quadratic, rcs3, rcs4, loglinear, fp1, fp2.
+   * Non-linear models (emax, exponential, hill) are not supported.
    *
    * @param {Array<{studyId: string, points: Array<{dose: number, effect: number, se: number}>}>} studyGroups
-   * @param {'linear'|'quadratic'} modelType - Fixed-effects design matrix type
-   * @param {number} [nKnots] - Reserved for future RCS extension
+   * @param {string} modelType - Fixed-effects design matrix type
+   * @param {number} [nKnots] - Number of knots for RCS models
+   * @param {object} [extraParams] - model-specific params (power, power1, power2, knots)
    * @returns {object|null} Model result or null if insufficient data
    */
-  function fitOneStageMixedEffects(studyGroups, modelType, nKnots) {
+  function fitOneStageMixedEffects(studyGroups, modelType, nKnots, extraParams) {
     // Validate inputs
     if (!studyGroups || studyGroups.length < 2) return null;
 
@@ -11505,28 +11609,46 @@ body.dark-mode .input-error { background: #451a1a !important; }
     }
 
     const n = allPoints.length;
-    const pFixed = modelType === 'quadratic' ? 3 : 2; // intercept + dose [+ dose^2]
+
+    // For RCS models, compute knots from all doses first (needed for pFixed)
+    var ep = extraParams ? Object.assign({}, extraParams) : {};
+    if ((modelType === 'rcs3' || modelType === 'rcs4') && !ep.knots) {
+      var allDoses = allPoints.map(function(p) { return p.dose; });
+      var nk = modelType === 'rcs3' ? 3 : 4;
+      ep.knots = computeRCSKnots(allDoses, nk);
+      if (!ep.knots) return null;
+    }
+    // For fp1: find best power from pooled two-stage fit
+    if (modelType === 'fp1' && ep.power == null) {
+      var pooledPts = allPoints.map(function(p) { return { dose: p.dose, effect: p.effect, se: p.se }; });
+      var fp1Fit = fitFP1DR(pooledPts);
+      ep.power = fp1Fit ? fp1Fit.power : 1;
+    }
+    // For fp2: find best powers from pooled two-stage fit
+    if (modelType === 'fp2' && ep.power1 == null) {
+      var pooledPts = allPoints.map(function(p) { return { dose: p.dose, effect: p.effect, se: p.se }; });
+      var fp2Fit = fitFP2DR(pooledPts);
+      ep.power1 = fp2Fit ? fp2Fit.power1 : 1;
+      ep.power2 = fp2Fit ? fp2Fit.power2 : 2;
+    }
+
+    const pFixed = designMatrixCols(modelType, ep);
 
     // Need at least pFixed + 1 total points
     if (n < pFixed + 1) return null;
 
     // Build fixed-effects design matrix X and response vector y
-    const X = [];
     const y = [];
     const ses = [];
     const doses = [];
     const studyIds = [];
     for (const pt of allPoints) {
-      if (modelType === 'quadratic') {
-        X.push([1, pt.dose, pt.dose * pt.dose]);
-      } else {
-        X.push([1, pt.dose]);
-      }
       y.push(pt.effect);
       ses.push(pt.se);
       doses.push(pt.dose);
       studyIds.push(pt.studyId);
     }
+    const X = buildDesignMatrix(doses, modelType, ep);
 
     // Organize points by study for random-effects estimation
     const studyMap = {};
@@ -11674,22 +11796,19 @@ body.dark-mode .input-error { background: #451a1a !important; }
     const aic = logLikPart + 2 * nParams;
     const bic = logLikPart + nParams * Math.log(n);
 
-    // Build per-study models
+    // Build per-study models using buildDesignMatrix
     const studyModels = [];
+    var epLocal = ep; // capture for closures
     for (const sid of studyKeys) {
       const pts = studyMap[sid];
       const nk = pts.length;
       if (nk < pFixed) continue; // need enough points for the model
 
-      const Xk = [];
+      const studyDoses = pts.map(function(p) { return p.dose; });
+      const Xk = buildDesignMatrix(studyDoses, modelType, epLocal);
       const yk = [];
       const wk = [];
       for (const p of pts) {
-        if (modelType === 'quadratic') {
-          Xk.push([1, p.dose, p.dose * p.dose]);
-        } else {
-          Xk.push([1, p.dose]);
-        }
         yk.push(p.effect);
         const se2 = p.se * p.se;
         const margVar = se2 + tau2_0 + tau2_1 * p.dose * p.dose;
@@ -11702,31 +11821,51 @@ body.dark-mode .input-error { background: #451a1a !important; }
         studyModels.push({
           studyId: sid,
           beta: sBeta,
-          predict: modelType === 'quadratic'
-            ? (d) => sBeta[0] + sBeta[1] * d + sBeta[2] * d * d
-            : (d) => sBeta[0] + sBeta[1] * d
+          predict: (function(sb, mt, epp) {
+            return function(d) {
+              var xRow = buildDesignRow(d, mt, epp);
+              var yh = sb[0];
+              for (var j = 0; j < xRow.length; j++) yh += sb[j + 1] * xRow[j];
+              return yh;
+            };
+          })(sBeta, modelType, epLocal)
         });
       }
     }
 
-    // Prediction functions using population-level (fixed) effects
-    const predictFn = modelType === 'quadratic'
-      ? (d) => beta[0] + beta[1] * d + beta[2] * d * d
-      : (d) => beta[0] + beta[1] * d;
+    // Prediction functions using population-level (fixed) effects and buildDesignRow
+    const predictFn = (function(b, mt, epp) {
+      return function(d) {
+        var xRow = buildDesignRow(d, mt, epp);
+        var yh = b[0];
+        for (var j = 0; j < xRow.length; j++) yh += b[j + 1] * xRow[j];
+        return yh;
+      };
+    })(beta, modelType, epLocal);
 
-    const predictCIFn = (d, zCrit) => {
-      const yh = predictFn(d);
-      const xVec = modelType === 'quadratic' ? [1, d, d * d] : [1, d];
-      let varYh = 0;
-      if (vcov) {
-        for (let i = 0; i < pFixed; i++) {
-          for (let j = 0; j < pFixed; j++) {
-            varYh += xVec[i] * vcov[i][j] * xVec[j];
+    const predictCIFn = (function(b, mt, epp, vc, pF) {
+      return function(d, zCrit) {
+        var xRow = buildDesignRow(d, mt, epp);
+        var xVec = [1].concat(xRow);
+        var yh = b[0];
+        for (var j = 0; j < xRow.length; j++) yh += b[j + 1] * xRow[j];
+        var varYh = 0;
+        if (vc) {
+          for (var i = 0; i < pF; i++) {
+            for (var j = 0; j < pF; j++) {
+              varYh += xVec[i] * vc[i][j] * xVec[j];
+            }
           }
         }
-      }
-      const seYh = Math.sqrt(Math.max(0, varYh));
-      return { y: yh, lo: yh - zCrit * seYh, hi: yh + zCrit * seYh };
+        var seYh = Math.sqrt(Math.max(0, varYh));
+        return { y: yh, lo: yh - zCrit * seYh, hi: yh + zCrit * seYh };
+      };
+    })(beta, modelType, epLocal, vcov, pFixed);
+
+    // Model type label map
+    var modelLabels = {
+      linear: 'Linear', quadratic: 'Quad', rcs3: 'RCS3', rcs4: 'RCS4',
+      loglinear: 'LogLin', fp1: 'FP1', fp2: 'FP2'
     };
 
     // Parameter string for display
@@ -11735,11 +11874,12 @@ body.dark-mode .input-error { background: #451a1a !important; }
       ', tau2_int=' + tau2_0.toFixed(4) + ', tau2_slp=' + tau2_1.toFixed(4);
 
     return {
-      model: 'OneStageME-' + (modelType === 'quadratic' ? 'Quad' : 'Linear'),
+      model: 'OneStageME-' + (modelLabels[modelType] || modelType),
       beta: beta,
       vcov: vcov,
       tau2_intercept: tau2_0,
       tau2_slope: tau2_1,
+      tau2: tau2_0 + tau2_1, // combined for PI computation
       R2: R2,
       aic: aic,
       bic: bic,
@@ -11782,6 +11922,99 @@ body.dark-mode .input-error { background: #451a1a !important; }
     results.push({ test: 'null if K<2', pass: fitOneStageMixedEffects([groups[0]], 'linear') === null });
     console.table(results);
     return results.every(r => r.pass);
+  }
+
+  /**
+   * Test one-stage mixed-effects with all supported model types.
+   */
+  function _testOneStageAllModels() {
+    var passed = 0, failed = 0;
+    function check(name, cond) {
+      if (cond) { passed++; } else { failed++; console.warn('OneStageAll FAIL:', name); }
+    }
+
+    // Build 4 studies with 6 dose levels each, mild curvature
+    var groups = [];
+    for (var s = 0; s < 4; s++) {
+      var points = [];
+      var intercept = 0.1 + (s - 1.5) * 0.05;
+      for (var di = 0; di <= 5; di++) {
+        var d = di * 10;
+        var y = intercept - 0.01 * d + 0.0001 * d * d + (s - 1.5) * 0.002 * d;
+        points.push({ dose: d, effect: y, se: 0.12 });
+      }
+      groups.push({ studyId: 'S' + (s + 1), points: points });
+    }
+
+    // Quadratic (regression test)
+    var resQuad = fitOneStageMixedEffects(groups, 'quadratic');
+    check('quadratic fits', resQuad !== null);
+    check('quadratic 3 beta', resQuad && resQuad.beta && resQuad.beta.length === 3);
+    check('quadratic has predict', resQuad && typeof resQuad.predict === 'function');
+
+    // RCS 3 knots
+    var resRCS3 = fitOneStageMixedEffects(groups, 'rcs3');
+    check('rcs3 fits', resRCS3 !== null);
+    check('rcs3 has 3 beta (intercept+2)', resRCS3 && resRCS3.beta && resRCS3.beta.length === 3);
+    check('rcs3 predict works', resRCS3 && typeof resRCS3.predict === 'function' && isFinite(resRCS3.predict(20)));
+
+    // Log-linear
+    var resLogLin = fitOneStageMixedEffects(groups, 'loglinear');
+    check('loglinear fits', resLogLin !== null);
+    check('loglinear 2 beta', resLogLin && resLogLin.beta && resLogLin.beta.length === 2);
+    check('loglinear predict', resLogLin && typeof resLogLin.predict === 'function' && isFinite(resLogLin.predict(25)));
+
+    // FP1
+    var resFP1 = fitOneStageMixedEffects(groups, 'fp1');
+    check('fp1 fits', resFP1 !== null);
+    check('fp1 2 beta', resFP1 && resFP1.beta && resFP1.beta.length === 2);
+
+    // FP2
+    var resFP2 = fitOneStageMixedEffects(groups, 'fp2');
+    check('fp2 fits', resFP2 !== null);
+    check('fp2 3 beta', resFP2 && resFP2.beta && resFP2.beta.length === 3);
+
+    // Non-supported type falls back gracefully (returns linear-like)
+    var resFallback = fitOneStageMixedEffects(groups, 'linear');
+    check('linear still works', resFallback !== null);
+
+    console.log('_testOneStageAllModels: ' + passed + ' passed, ' + failed + ' failed');
+    return failed === 0;
+  }
+
+  /**
+   * Test prediction interval computation (normalQuantile already tested via existing tests).
+   */
+  function _testPredictionInterval() {
+    var passed = 0, failed = 0;
+    function approxEq(a, b, tol) { return Math.abs(a - b) < (tol ?? 0.01); }
+    function check(name, cond) { if (cond) passed++; else { failed++; console.warn('PI FAIL:', name); } }
+
+    // normalQuantile tests (leveraging existing function)
+    check('normQ 0.5 = 0', approxEq(normalQuantile(0.5), 0, 1e-6));
+    check('normQ 0.975 ~ 1.96', approxEq(normalQuantile(0.975), 1.96, 0.01));
+    check('normQ 0.025 ~ -1.96', approxEq(normalQuantile(0.025), -1.96, 0.01));
+    check('normQ 0.995 ~ 2.576', approxEq(normalQuantile(0.995), 2.576, 0.01));
+
+    // tQuantile tests
+    check('tQ df=30 ~ 2.042', approxEq(tQuantile(0.975, 30), 2.042, 0.02));
+    check('tQ df=5 ~ 2.571', approxEq(tQuantile(0.975, 5), 2.571, 0.03));
+    check('tQ df=1000 ~ 1.96', approxEq(tQuantile(0.975, 1000), 1.96, 0.01));
+
+    // PI test: yhat=0, se=0.05, tau2=0.01, k=6, p=1, 95%
+    var pi = computePredictionInterval(0, 0.05, 0.01, 6, 1, 0.95);
+    check('PI not null', pi !== null);
+    check('PI wider than CI', pi && (pi.upper - pi.lower) > 2 * 1.96 * 0.05);
+    check('PI symmetric', pi && approxEq(pi.upper, -pi.lower, 0.001));
+    check('PI undefined k<=p', computePredictionInterval(0, 0.05, 0.01, 1, 1, 0.95) === null);
+
+    // PI with tau2=0 should still work (reduces to something like CI with t-distribution)
+    var pi0 = computePredictionInterval(1.0, 0.1, 0, 10, 2, 0.95);
+    check('PI tau2=0 not null', pi0 !== null);
+    check('PI tau2=0 piSE = se', pi0 && approxEq(pi0.piSE, 0.1, 0.001));
+
+    console.log('_testPredictionInterval: ' + passed + ' passed, ' + failed + ' failed');
+    return failed === 0;
   }
 
   // ═══════════════════════════════════════════════════════════════════════
@@ -11905,6 +12138,9 @@ body.dark-mode .input-error { background: #451a1a !important; }
     try { results.glsFit = _testGLSFit(); } catch(e) { results.glsFit = false; console.error('GLS Fit tests error:', e); }
     try { results.mlReml = _testMLREML(); } catch(e) { results.mlReml = false; console.error('ML/REML tests error:', e); }
     try { results.newModels = _testNewModels(); } catch(e) { results.newModels = false; console.error('NewModels tests error:', e); }
+    try { results.oneStageAll = _testOneStageAllModels(); } catch(e) { results.oneStageAll = false; console.error('OneStageAll tests error:', e); }
+    try { results.predInterval = _testPredictionInterval(); } catch(e) { results.predInterval = false; console.error('PredInterval tests error:', e); }
+    try { results.modelAveraging = _testModelAveraging(); } catch(e) { results.modelAveraging = false; console.error('ModelAveraging tests error:', e); }
 
     console.log('=== Results ===');
     console.table(results);
@@ -11996,6 +12232,119 @@ body.dark-mode .input-error { background: #451a1a !important; }
       models[i].aicWeight = sumExp > 0 ? models[i].aicLikelihood / sumExp : 0;
     }
     return { best: models[0], all: models };
+  }
+
+  /**
+   * Compute model-averaged prediction at a single dose.
+   * Uses Burnham & Anderson (2002) unconditional variance formula (eq 4.9).
+   * @param {Array} models - array of model objects with .aicWeight, .predict, .predictCI
+   * @param {number} dose - dose value
+   * @param {number} [confLevel=0.95] - confidence level
+   * @returns {{prediction: number, se: number, lower: number, upper: number, weights: Array}|null}
+   */
+  function modelAveragedPrediction(models, dose, confLevel) {
+    var cl = confLevel ?? 0.95;
+    var z = normalQuantile(1 - (1 - cl) / 2);
+    var active = [];
+    for (var i = 0; i < models.length; i++) {
+      if (models[i].aicWeight > 0.01 && models[i].predict) active.push(models[i]);
+    }
+    if (active.length === 0) return null;
+
+    // Weighted average prediction
+    var totalWeight = 0;
+    for (var i = 0; i < active.length; i++) totalWeight += active[i].aicWeight;
+    var yAvg = 0;
+    for (var i = 0; i < active.length; i++) {
+      yAvg += (active[i].aicWeight / totalWeight) * active[i].predict(dose);
+    }
+
+    // Unconditional SE (Burnham & Anderson 2002, eq 4.9)
+    var varAvg = 0;
+    for (var i = 0; i < active.length; i++) {
+      var wi = active[i].aicWeight / totalWeight;
+      var se_i = 0;
+      if (active[i].predictCI) {
+        var ci = active[i].predictCI(dose, 1); // zCrit=1 to get SE directly
+        se_i = (ci.hi - ci.lo) / 2; // SE = half-width at z=1
+      }
+      var diff = active[i].predict(dose) - yAvg;
+      varAvg += wi * (se_i * se_i + diff * diff);
+    }
+    var seAvg = Math.sqrt(varAvg);
+
+    return {
+      prediction: yAvg,
+      se: seAvg,
+      lower: yAvg - z * seAvg,
+      upper: yAvg + z * seAvg,
+      weights: active.map(function(m) { return { type: m.model || m.type, weight: m.aicWeight }; })
+    };
+  }
+
+  /**
+   * Compute a full model-averaged dose-response curve.
+   * @param {Array} models - array of model objects with .aicWeight, .predict, .predictCI
+   * @param {number} maxDose - maximum dose for curve
+   * @param {number} [confLevel=0.95]
+   * @param {number} [nPoints=100]
+   * @returns {Array<{dose: number, pred: number, lo: number, hi: number, se: number}>}
+   */
+  function computeModelAveragedCurve(models, maxDose, confLevel, nPoints) {
+    var pts = nPoints ?? 100;
+    var curve = [];
+    for (var i = 0; i <= pts; i++) {
+      var dose = (i / pts) * maxDose;
+      var avg = modelAveragedPrediction(models, dose, confLevel);
+      if (avg) {
+        curve.push({ dose: dose, pred: avg.prediction, lo: avg.lower, hi: avg.upper, se: avg.se });
+      }
+    }
+    return curve;
+  }
+
+  /**
+   * Test model-averaged predictions.
+   */
+  function _testModelAveraging() {
+    var passed = 0, failed = 0;
+    function approxEq(a, b, tol) { return Math.abs(a - b) < (tol ?? 0.01); }
+    function check(name, cond) { if (cond) passed++; else { failed++; console.warn('MA FAIL:', name); } }
+
+    var models = [
+      { model: 'linear', aicWeight: 0.7,
+        predict: function(d) { return -0.01 * d; },
+        predictCI: function(d, z) { var se = 0.005 * d; return {y: -0.01*d, lo: -0.01*d - z*se, hi: -0.01*d + z*se}; } },
+      { model: 'quadratic', aicWeight: 0.3,
+        predict: function(d) { return -0.02 * d + 0.0003 * d * d; },
+        predictCI: function(d, z) { var se = 0.006 * d; var y = -0.02*d + 0.0003*d*d; return {y: y, lo: y - z*se, hi: y + z*se}; } }
+    ];
+
+    var avg = modelAveragedPrediction(models, 20, 0.95);
+    var expected = 0.7 * (-0.2) + 0.3 * (-0.4 + 0.12);
+    check('MA prediction', avg && approxEq(avg.prediction, expected, 0.01));
+    check('MA SE > 0', avg && avg.se > 0);
+    check('MA CI contains pred', avg && avg.lower < avg.prediction && avg.upper > avg.prediction);
+    check('MA has weights', avg && avg.weights && avg.weights.length === 2);
+
+    // Curve
+    var curve = computeModelAveragedCurve(models, 50, 0.95, 10);
+    check('MA curve has points', curve && curve.length > 0);
+    check('MA curve dose=0 pred=0', curve && approxEq(curve[0].pred, 0, 0.001));
+
+    // Edge: no models with weight > 0.01
+    var noModels = [{ model: 'x', aicWeight: 0.001, predict: function(d) { return 0; } }];
+    check('MA empty models', modelAveragedPrediction(noModels, 10) === null);
+
+    // Single model with weight 1.0
+    var singleModel = [{ model: 'single', aicWeight: 1.0,
+      predict: function(d) { return 0.5 * d; },
+      predictCI: function(d, z) { var se = 0.1 * d; return {y: 0.5*d, lo: 0.5*d - z*se, hi: 0.5*d + z*se}; } }];
+    var singleAvg = modelAveragedPrediction(singleModel, 10, 0.95);
+    check('MA single model pred', singleAvg && approxEq(singleAvg.prediction, 5.0, 0.001));
+
+    console.log('_testModelAveraging: ' + passed + ' passed, ' + failed + ' failed');
+    return failed === 0;
   }
 
   /**
@@ -12177,8 +12526,12 @@ body.dark-mode .input-error { background: #451a1a !important; }
         // Determine model type from dropdown
         const drModelSel = document.getElementById('drModelSelect');
         const userChoice = drModelSel ? drModelSel.value : 'auto';
-        // Map to one-stage model type (only linear and quadratic supported for one-stage)
-        const modelType = (userChoice === 'quadratic') ? 'quadratic' : 'linear';
+        // Map user choice to one-stage model type (linear models only; non-linear emax/exponential/hill not supported)
+        var oneStageMap = { linear: 'linear', quadratic: 'quadratic', rcs3: 'rcs3', rcs4: 'rcs4',
+          loglinear: 'loglinear', fp1: 'fp1', fp2: 'fp2' };
+        var modelType = oneStageMap[userChoice] || 'linear';
+        // Non-linear models fall back to linear for one-stage
+        if (userChoice === 'emax' || userChoice === 'exponential' || userChoice === 'hill') modelType = 'linear';
 
         const zCrit = normalQuantile(1 - (1 - confLevel) / 2);
         const oneStageResult = fitOneStageMixedEffects(studyGroups, modelType);
@@ -12234,8 +12587,57 @@ body.dark-mode .input-error { background: #451a1a !important; }
     // Respect user model selection from dropdown
     const drModelSel = document.getElementById('drModelSelect');
     const userChoice = drModelSel ? drModelSel.value : 'auto';
+
+    // Handle model-averaged curve
+    if (userChoice === 'averaged' && comparison.all.length >= 2) {
+      var maxDoseForCurve = Math.max.apply(null, data.points.map(function(p) { return p.dose; })) * 1.05;
+      var maCurve = computeModelAveragedCurve(comparison.all, maxDoseForCurve, confLevel, 80);
+      if (maCurve && maCurve.length > 0) {
+        // Build a pseudo-model object compatible with renderDoseResponseCurveSVG
+        var maModel = {
+          model: 'Model-Averaged',
+          R2: 0,
+          predict: function(d) { var a = modelAveragedPrediction(comparison.all, d, confLevel); return a ? a.prediction : 0; },
+          predictCI: function(d, zc) {
+            var a = modelAveragedPrediction(comparison.all, d, confLevel);
+            if (!a) return { y: 0, lo: 0, hi: 0 };
+            return { y: a.prediction, lo: a.prediction - zc * a.se, hi: a.prediction + zc * a.se };
+          },
+          nPoints: data.points.length
+        };
+        // Compute weighted-average R2
+        var sumWR2 = 0, sumW = 0;
+        for (var mi = 0; mi < comparison.all.length; mi++) {
+          if (comparison.all[mi].aicWeight > 0.01) {
+            sumWR2 += comparison.all[mi].aicWeight * (comparison.all[mi].R2 ?? 0);
+            sumW += comparison.all[mi].aicWeight;
+          }
+        }
+        maModel.R2 = sumW > 0 ? sumWR2 / sumW : 0;
+
+        var maSvgHtml = renderDoseResponseCurveSVG(data.points, maModel, confLevel, zCrit, data.isRatio);
+        var maTableHtml = renderModelComparisonTable(comparison.all, 'Model-Averaged');
+
+        // Build model-averaged stats summary
+        var maStatsHtml = '<div style="margin-top:12px;font-size:0.85rem">';
+        maStatsHtml += '<strong>Model-Averaged Predictions</strong> (Burnham &amp; Anderson 2002)<br>';
+        maStatsHtml += 'Contributing models (' + comparison.all.filter(function(m) { return m.aicWeight > 0.01; }).length + '):<br>';
+        var modelsAboveThreshold = comparison.all.filter(function(m) { return m.aicWeight > 0.01; });
+        for (var mi = 0; mi < modelsAboveThreshold.length; mi++) {
+          var mm = modelsAboveThreshold[mi];
+          maStatsHtml += '&nbsp;&nbsp;\u2022 ' + mm.model + ': w<sub>i</sub> = ' + (mm.aicWeight * 100).toFixed(1) + '%<br>';
+        }
+        maStatsHtml += 'Weighted R\u00B2 = ' + (maModel.R2 * 100).toFixed(1) + '% | k = ' + data.points.length + ' data points';
+        maStatsHtml += '</div>';
+
+        el.innerHTML = '<h3 style="font-size:0.95rem;margin-bottom:8px">Dose-Response Curve (Model-Averaged)</h3>' +
+          maSvgHtml + maStatsHtml + maTableHtml;
+        return;
+      }
+    }
+
     let best;
-    if (userChoice === 'auto') {
+    if (userChoice === 'auto' || userChoice === 'averaged') {
       best = comparison.best;
     } else {
       const modelMap = {
@@ -12314,12 +12716,23 @@ body.dark-mode .input-error { background: #451a1a !important; }
     const minD = Math.min(0, ...doses);
     const maxD = Math.max(...doses) * 1.05;
     const allY = [...effects];
+    // Check PI checkbox and tau2 availability for Y-range expansion
+    var showPIEl = (typeof document !== 'undefined') ? document.getElementById('drShowPI') : null;
+    var showPI = showPIEl && showPIEl.checked && model && model.tau2 != null && model.tau2 > 0;
+    var piNStudies = model ? (model.nStudies ?? model.nPoints ?? points.length) : points.length;
+    var piNParams = model ? (model.nParams ?? 1) : 1;
     // Add curve predictions to find Y range
     const nCurve = 80;
     for (let i = 0; i <= nCurve; i++) {
       const d = minD + (maxD - minD) * i / nCurve;
       const pred = model.predictCI(d, zCrit);
       allY.push(pred.lo, pred.hi);
+      // Expand range for PI if enabled
+      if (showPI) {
+        var sePred = (pred.hi - pred.lo) / (2 * zCrit);
+        var pi = computePredictionInterval(pred.y, sePred, model.tau2, piNStudies, piNParams, confLevel);
+        if (pi) { allY.push(pi.lower, pi.upper); }
+      }
     }
     // DR-12: range-based padding (avoids zero padding when min/max is 0)
     const yPad = (Math.max(...allY) - Math.min(...allY)) * 0.1 || 0.5;
@@ -12361,6 +12774,37 @@ body.dark-mode .input-error { background: #451a1a !important; }
     bandPath += 'Z';
     const isDark = document.body.classList.contains('dark-mode');
     svg += '<path d="' + bandPath + '" fill="' + (isDark ? 'rgba(59,130,246,0.2)' : 'rgba(37,99,235,0.12)') + '" stroke="none"/>';
+    // Prediction interval band (dashed, wider than CI)
+    if (showPI) {
+      var piUpperPath = 'M', piLowerPath = '';
+      var piPoints = [];
+      for (var pi_i = 0; pi_i <= nCurve; pi_i++) {
+        var cp = curvePoints[pi_i];
+        var sePred = (cp.hi - cp.lo) / (2 * zCrit);
+        var pi = computePredictionInterval(cp.y, sePred, model.tau2, piNStudies, piNParams, confLevel);
+        if (pi) {
+          piPoints.push({ d: cp.d, piLo: pi.lower, piHi: pi.upper });
+          piUpperPath += (pi_i === 0 ? '' : 'L') + xScale(cp.d).toFixed(1) + ',' + yScale(pi.upper).toFixed(1);
+        }
+      }
+      // Draw upper PI line
+      if (piPoints.length > 1) {
+        svg += '<path d="' + piUpperPath + '" fill="none" stroke="' + (isDark ? '#94a3b8' : '#9ca3af') + '" stroke-width="1.5" stroke-dasharray="6,4"/>';
+        // Draw lower PI line
+        var piLPath = 'M';
+        for (var pi_j = 0; pi_j < piPoints.length; pi_j++) {
+          piLPath += (pi_j === 0 ? '' : 'L') + xScale(piPoints[pi_j].d).toFixed(1) + ',' + yScale(piPoints[pi_j].piLo).toFixed(1);
+        }
+        svg += '<path d="' + piLPath + '" fill="none" stroke="' + (isDark ? '#94a3b8' : '#9ca3af') + '" stroke-width="1.5" stroke-dasharray="6,4"/>';
+        // Light PI fill between upper and lower
+        var piFillPath = piUpperPath;
+        for (var pi_k = piPoints.length - 1; pi_k >= 0; pi_k--) {
+          piFillPath += 'L' + xScale(piPoints[pi_k].d).toFixed(1) + ',' + yScale(piPoints[pi_k].piLo).toFixed(1);
+        }
+        piFillPath += 'Z';
+        svg += '<path d="' + piFillPath + '" fill="' + (isDark ? 'rgba(148,163,184,0.1)' : 'rgba(156,163,175,0.08)') + '" stroke="none"/>';
+      }
+    }
     // Fitted curve
     let curvePath = 'M';
     for (let i = 0; i <= nCurve; i++) {
