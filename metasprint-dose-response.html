@@ -8846,6 +8846,77 @@ body.dark-mode .input-error { background: #451a1a !important; }
   }
 
   /**
+   * Greenland-Longnecker covariance reconstruction for dose-response meta-analysis.
+   * Reconstructs the within-study (k-1)x(k-1) covariance matrix for log-transformed
+   * contrasts vs. a reference dose group, given case counts and sample sizes.
+   *
+   * Reference: Greenland S, Longnecker MP. Methods for trend estimation from
+   * summarized dose-response data, with applications to meta-analysis.
+   * Am J Epidemiol. 1992;135(11):1301-9.
+   *
+   * @param {number[]} cases - case counts per dose level (including reference)
+   * @param {number[]} n - total N (or person-time for IR) per dose level
+   * @param {number} refIdx - index of the reference dose level (usually 0)
+   * @param {string} type - 'cc' (case-control logOR), 'ci' (cumulative incidence logRR), or 'ir' (incidence rate logRR)
+   * @returns {number[][]} (k-1)x(k-1) covariance matrix for non-reference contrasts
+   */
+  function greenlandLongnecker(cases, n, refIdx, type) {
+    const k = cases.length;
+    if (k < 2) throw new Error('greenlandLongnecker: need at least 2 dose levels');
+    if (n.length !== k) throw new Error('greenlandLongnecker: cases and n must have same length');
+    if (refIdx < 0 || refIdx >= k) throw new Error('greenlandLongnecker: refIdx out of range');
+
+    const a0 = cases[refIdx];
+    const n0 = n[refIdx];
+
+    // Build list of non-reference indices
+    const nonRef = [];
+    for (let i = 0; i < k; i++) {
+      if (i !== refIdx) nonRef.push(i);
+    }
+    const m = nonRef.length; // k-1
+
+    // Compute the shared covariance term from the reference group
+    let covRef;
+    if (type === 'cc') {
+      // Case-control: cov = 1/a_0 + 1/(n_0 - a_0)
+      covRef = 1 / a0 + 1 / (n0 - a0);
+    } else if (type === 'ci') {
+      // Cumulative incidence: cov = 1/a_0 - 1/n_0
+      covRef = 1 / a0 - 1 / n0;
+    } else if (type === 'ir') {
+      // Incidence rate: cov = 1/a_0
+      covRef = 1 / a0;
+    } else {
+      throw new Error('greenlandLongnecker: type must be "cc", "ci", or "ir"');
+    }
+
+    // Build (k-1)x(k-1) covariance matrix
+    const S = [];
+    for (let i = 0; i < m; i++) {
+      S[i] = new Array(m);
+      for (let j = 0; j < m; j++) {
+        if (i === j) {
+          // Diagonal: variance of contrast i
+          const ai = cases[nonRef[i]];
+          const ni = n[nonRef[i]];
+          if (type === 'cc') {
+            S[i][j] = 1 / ai + 1 / (ni - ai) + covRef;
+          } else if (type === 'ci') {
+            S[i][j] = 1 / ai - 1 / ni + covRef;
+          } else { // ir
+            S[i][j] = 1 / ai + covRef;
+          }
+        } else {
+          // Off-diagonal: covariance comes only from the shared reference group
+          S[i][j] = covRef;
+        }
+      }
+    }
+    return S;
+  }
+
+  /**
    * Self-test for NxN matrix operations and WLS solver.
    * Logs results to console. Returns { passed, failed, details }.
    */
@@ -8954,6 +9025,128 @@ body.dark-mode .input-error { background: #451a1a !important; }
   // ═══════════════════════════════════════════════════════════════════════
   // End NxN Matrix Operations
   // ═══════════════════════════════════════════════════════════════════════
+
+  /**
+   * Self-test for Greenland-Longnecker covariance reconstruction.
+   * Validates diagonal/off-diagonal values against hand-computed formulas
+   * using the direct GL method (raw cell counts, no iterative adjustment).
+   * @returns {boolean} true if all tests pass
+   */
+  function _testGLCovariance() {
+    let passed = 0, failed = 0;
+    function approxEq(a, b, tol) { return Math.abs(a - b) < (tol ?? 1e-4); }
+    function check(name, a, b) {
+      if (approxEq(a, b)) { passed++; }
+      else { failed++; console.warn('GL FAIL:', name, 'expected', b, 'got', a); }
+    }
+
+    // --- Test 1: Case-control (cc_ex), 4 dose levels, ref=0 ---
+    // Direct GL formula: var(logOR_i) = 1/a_i + 1/(n_i-a_i) + 1/a_0 + 1/(n_0-a_0)
+    //                    cov = 1/a_0 + 1/(n_0-a_0)
+    {
+      const S = greenlandLongnecker([165, 74, 90, 122], [337, 167, 186, 212], 0, 'cc');
+      // covRef = 1/165 + 1/172 = 0.01187456
+      check('cc diag[0][0]', S[0][0], 0.03614076);
+      check('cc diag[1][1]', S[1][1], 0.03340234);
+      check('cc diag[2][2]', S[2][2], 0.03118239);
+      check('cc off[0][1]',  S[0][1], 0.01187456);
+      check('cc off[0][2]',  S[0][2], 0.01187456);
+      check('cc off[1][2]',  S[1][2], 0.01187456);
+      // Symmetry
+      check('cc sym[1][0]',  S[1][0], S[0][1]);
+      check('cc sym[2][0]',  S[2][0], S[0][2]);
+      check('cc sym[2][1]',  S[2][1], S[1][2]);
+      // Matrix dimensions
+      check('cc rows=3', S.length, 3);
+      check('cc cols=3', S[0].length, 3);
+    }
+
+    // --- Test 2: Cumulative incidence (ci_ex), 5 dose levels, ref=0 ---
+    // Direct GL formula: var(logRR_i) = 1/a_i - 1/n_i + 1/a_0 - 1/n_0
+    //                    cov = 1/a_0 - 1/n_0
+    {
+      const S = greenlandLongnecker(
+        [110, 212, 211, 132, 133],
+        [8103, 17538, 15304, 9078, 10685],
+        0, 'ci'
+      );
+      // covRef = 1/110 - 1/8103 = 0.008967498
+      check('ci diag[0][0]', S[0][0], 0.01362746);
+      check('ci diag[1][1]', S[1][1], 0.01364149);
+      check('ci diag[2][2]', S[2][2], 0.01643310);
+      check('ci diag[3][3]', S[3][3], 0.01639271);
+      check('ci off[0][1]',  S[0][1], 0.00896750);
+      check('ci off[0][3]',  S[0][3], 0.00896750);
+      check('ci rows=4', S.length, 4);
+    }
+
+    // --- Test 3: Incidence rate (ir_ex), 5 dose levels, ref=0 ---
+    // Direct GL formula: var(logRR_i) = 1/a_i + 1/a_0, cov = 1/a_0
+    {
+      const S = greenlandLongnecker(
+        [148, 127, 114, 107, 95],
+        [134707, 133824, 130654, 124522, 117808],
+        0, 'ir'
+      );
+      // covRef = 1/148 = 0.006756757
+      check('ir diag[0][0]', S[0][0], 0.01463077);
+      check('ir diag[1][1]', S[1][1], 0.01552869);
+      check('ir diag[2][2]', S[2][2], 0.01610255);
+      check('ir diag[3][3]', S[3][3], 0.01728307);
+      check('ir off[0][1]',  S[0][1], 0.00675676);
+      check('ir off[2][3]',  S[2][3], 0.00675676);
+      check('ir rows=4', S.length, 4);
+    }
+
+    // --- Test 4: alcohol_cvd Study 1 (Bianchi), cc, 5 dose levels, ref=0 ---
+    {
+      const S = greenlandLongnecker(
+        [126, 61, 69, 22, 19],
+        [414, 261, 228, 44, 34],
+        0, 'cc'
+      );
+      // covRef = 1/126 + 1/288 = 0.01140873
+      check('bianchi diag[0][0]', S[0][0], 0.03280217);
+      check('bianchi diag[1][1]', S[1][1], 0.03219079);
+      check('bianchi diag[2][2]', S[2][2], 0.10231782);
+      check('bianchi diag[3][3]', S[3][3], 0.13070698);
+      check('bianchi off[0][1]',  S[0][1], 0.01140873);
+      check('bianchi off[0][2]',  S[0][2], 0.01140873);
+      check('bianchi off[0][3]',  S[0][3], 0.01140873);
+      check('bianchi off[1][2]',  S[1][2], 0.01140873);
+      check('bianchi off[1][3]',  S[1][3], 0.01140873);
+      check('bianchi off[2][3]',  S[2][3], 0.01140873);
+      check('bianchi rows=4', S.length, 4);
+    }
+
+    // --- Test 5: Edge case - 2 dose levels (minimum) ---
+    {
+      const S = greenlandLongnecker([50, 30], [100, 80], 0, 'cc');
+      // 1x1 matrix: var = 1/30 + 1/50 + 1/50 + 1/50 = 1/30 + 1/50 + 1/50 + 1/50
+      // a0=50, n0=100, c0=50; covRef = 1/50 + 1/50 = 0.04
+      // a1=30, c1=50; var = 1/30 + 1/50 + 0.04 = 0.09333...
+      check('edge 1x1 [0][0]', S[0][0], 1/30 + 1/50 + 1/50 + 1/50);
+      check('edge 1x1 rows=1', S.length, 1);
+    }
+
+    // --- Test 6: Error handling ---
+    {
+      let threw = false;
+      try { greenlandLongnecker([10], [50], 0, 'cc'); } catch(e) { threw = true; }
+      check('error: k<2 throws', threw, true);
+
+      threw = false;
+      try { greenlandLongnecker([10, 20], [50], 0, 'cc'); } catch(e) { threw = true; }
+      check('error: length mismatch throws', threw, true);
+
+      threw = false;
+      try { greenlandLongnecker([10, 20], [50, 60], 0, 'zz'); } catch(e) { threw = true; }
+      check('error: bad type throws', threw, true);
+    }
+
+    console.log(`_testGLCovariance: ${passed} passed, ${failed} failed`);
+    return failed === 0;
+  }
 
   /**
    * Self-test for continuous input mode (Mean/SD/N per dose).
@@ -10234,6 +10427,7 @@ body.dark-mode .input-error { background: #451a1a !important; }
     try { results.aicWeights = _testAICWeights(); } catch(e) { results.aicWeights = false; console.error('AICWeights tests error:', e); }
     try { results.drHeterogeneity = _testDRHeterogeneity(); } catch(e) { results.drHeterogeneity = false; console.error('DRHeterogeneity tests error:', e); }
     try { results.csvParser = _testCSVParser(); } catch(e) { results.csvParser = false; console.error('CSVParser tests error:', e); }
+    try { results.glCovariance = _testGLCovariance(); } catch(e) { results.glCovariance = false; console.error('GL Covariance tests error:', e); }
 
     console.log('=== Results ===');
     console.table(results);
