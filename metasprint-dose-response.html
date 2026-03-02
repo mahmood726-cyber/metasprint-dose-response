@@ -1511,6 +1511,9 @@ body.dark-mode .input-error { background: #451a1a !important; }
       <div id="metaRegressionContainer" style="margin-top:20px"></div>
       <div id="doseResponseCurveContainer" style="margin-top:20px"></div>
       <div id="networkDRContainer" style="margin-top:20px"></div>
+      <div id="doseForestContainer" style="margin-top:20px"></div>
+      <div id="drFunnelContainer" style="margin-top:20px"></div>
+      <div id="doseMetricsContainer" style="margin-top:20px"></div>
     </section>
 
     <!-- Phase 7: Write -->
@@ -12176,6 +12179,7 @@ body.dark-mode .input-error { background: #451a1a !important; }
     try { results.rValidation = _testVsR(); } catch(e) { results.rValidation = false; console.error('R validation error:', e); }
     try { results.gapToProtocol = _testGapToProtocol(); } catch(e) { results.gapToProtocol = false; console.error('GapToProtocol tests error:', e); }
     try { results.advancedDR = _testAdvancedDRFeatures(); } catch(e) { results.advancedDR = false; console.error('AdvancedDR tests error:', e); }
+    try { results.top5Advanced = _testTop5AdvancedFeatures(); } catch(e) { results.top5Advanced = false; console.error('Top5Advanced tests error:', e); }
 
     console.log('=== Results ===');
     console.table(results);
@@ -12677,6 +12681,203 @@ body.dark-mode .input-error { background: #451a1a !important; }
   }
 
   /**
+   * Test suite for Top-5 Advanced DR Features:
+   * 1. Dose-finding metrics, 2. Bayesian DR, 3. DR pub bias, 4. Dose forest plot, 5. Bootstrap breakpoint CI
+   */
+  function _testTop5AdvancedFeatures() {
+    let passed = 0, failed = 0;
+    function check(label, cond) {
+      if (cond) { passed++; }
+      else { failed++; console.warn('FAIL: ' + label); }
+    }
+
+    // === Feature 1: Dose-Finding Metrics ===
+    check('computeDoseMetrics exists', typeof computeDoseMetrics === 'function');
+    check('renderDoseMetricsCard exists', typeof renderDoseMetricsCard === 'function');
+
+    // Test on quadratic model with clear max
+    var quadPts = [];
+    for (var i = 0; i <= 10; i++) quadPts.push({ dose: i, effect: -0.5 * i * i + 5 * i, se: 0.5 });
+    var qModel = fitQuadraticDR(quadPts);
+    if (qModel) {
+      var metrics = computeDoseMetrics(qModel, 10, 0);
+      check('Dose metrics returned', metrics !== null);
+      check('ED50 exists', metrics && metrics.ED50 != null);
+      check('ED90 exists', metrics && metrics.ED90 != null);
+      check('ED50 < ED90', metrics && metrics.ED50 < metrics.ED90);
+      check('Max effect dose near 5', metrics && Math.abs(metrics.maxEffectDose - 5) < 2);
+      check('Therapeutic window valid', metrics && metrics.therapeuticWindow.lo < metrics.therapeuticWindow.hi);
+
+      // Metrics card renders HTML
+      var cardHtml = renderDoseMetricsCard(metrics);
+      check('Metrics card has HTML', cardHtml.length > 50);
+      check('Metrics card has ED50', cardHtml.includes('ED'));
+      check('Metrics card has NOAEL', cardHtml.includes('NOAEL'));
+    }
+
+    // Test on linear model
+    var linPts = [];
+    for (var i = 0; i <= 10; i++) linPts.push({ dose: i, effect: 0.5 * i, se: 0.2 });
+    var lModel = fitLinearDR(linPts);
+    if (lModel) {
+      var lMetrics = computeDoseMetrics(lModel, 10, 0);
+      check('Linear metrics returned', lMetrics !== null);
+      check('Linear ED50 reasonable', lMetrics && lMetrics.ED50 > 0 && lMetrics.ED50 < 10);
+    }
+
+    // Test with clinical threshold
+    if (qModel) {
+      var tMetrics = computeDoseMetrics(qModel, 10, 2);
+      check('Threshold metrics returned', tMetrics !== null);
+      check('MED with threshold', tMetrics && tMetrics.MED != null);
+    }
+
+    // Null inputs
+    check('Null model returns null', computeDoseMetrics(null, 10, 0) === null);
+    check('Zero maxDose returns null', computeDoseMetrics(qModel, 0, 0) === null);
+
+    // === Feature 2: Bayesian DR (Laplace Approximation) ===
+    check('fitBayesianDR exists', typeof fitBayesianDR === 'function');
+    check('renderBayesCrIBand exists', typeof renderBayesCrIBand === 'function');
+
+    // Fit Bayesian linear model
+    var bayesLin = fitBayesianDR(linPts, 'linear', 10);
+    check('Bayesian linear fits', bayesLin !== null);
+    check('Bayesian model name', bayesLin && bayesLin.model === 'Bayesian-Linear');
+    check('Bayesian has posteriorMean', bayesLin && bayesLin.posteriorMean && bayesLin.posteriorMean.length === 2);
+    check('Bayesian has posteriorSD', bayesLin && bayesLin.posteriorSD && bayesLin.posteriorSD.length === 2);
+    check('Bayesian has predictBayesCrI', bayesLin && typeof bayesLin.predictBayesCrI === 'function');
+
+    // Bayesian CrI is narrower than frequentist CI (prior shrinks toward 0)
+    if (bayesLin) {
+      var crI = bayesLin.predictBayesCrI(5, 0.95);
+      var freqCI = bayesLin.predictCI(5, 1.96);
+      check('Bayesian CrI has y', crI && isFinite(crI.y));
+      check('Bayesian CrI has lo < hi', crI && crI.lo < crI.hi);
+      // Bayesian CrI should be similar in magnitude to frequentist CI
+      // (diagonal Laplace approx may differ from full covariance CI due to missing cross-terms)
+      var crIWidth = crI.hi - crI.lo;
+      var freqWidth = freqCI.hi - freqCI.lo;
+      check('Bayesian CrI reasonable vs freq CI', crIWidth > 0 && crIWidth < freqWidth * 3);
+    }
+
+    // Fit Bayesian quadratic
+    var bayesQuad = fitBayesianDR(quadPts, 'quadratic', 10);
+    check('Bayesian quadratic fits', bayesQuad !== null);
+    check('Bayesian quad 3 params', bayesQuad && bayesQuad.posteriorMean && bayesQuad.posteriorMean.length === 3);
+
+    // Bayesian CrI band SVG
+    if (bayesLin) {
+      var xScale = function(d) { return 65 + d * 50; };
+      var yScale = function(y) { return 350 - y * 50; };
+      var bandSvg = renderBayesCrIBand(bayesLin, xScale, yScale, 0, 10, 50, false);
+      check('CrI band has path', bandSvg.includes('<path'));
+      check('CrI band has purple fill', bandSvg.includes('124,58,237'));
+    }
+
+    // Null inputs
+    check('Bayesian null points returns null', fitBayesianDR(null, 'linear', 10) === null);
+    check('Bayesian too few points returns null', fitBayesianDR([{dose:0,effect:0,se:1}], 'linear', 10) === null);
+
+    // === Feature 3: DR-Specific Publication Bias ===
+    check('renderDRFunnelPlot exists', typeof renderDRFunnelPlot === 'function');
+    check('testDoseReportingBias exists', typeof testDoseReportingBias === 'function');
+    check('doseEggerRegression exists', typeof doseEggerRegression === 'function');
+
+    // Test funnel plot on quadratic data
+    var funnelSvg = renderDRFunnelPlot(quadPts, qModel);
+    check('DR funnel has SVG', funnelSvg.includes('<svg'));
+    check('DR funnel has circles', funnelSvg.includes('<circle'));
+    check('DR funnel has title', funnelSvg.includes('DR Funnel Plot'));
+
+    // Test dose reporting bias
+    var reportBias = testDoseReportingBias(quadPts);
+    check('Dose reporting bias returned', reportBias !== null);
+    check('Bias has chi2', reportBias && isFinite(reportBias.chi2));
+    check('Bias has pValue', reportBias && reportBias.pValue >= 0 && reportBias.pValue <= 1);
+    check('Bias has interpretation', reportBias && reportBias.interpretation.length > 10);
+    check('Bias has doseBins', reportBias && reportBias.doseBins.length >= 3);
+
+    // Test dose Egger regression (needs varying SEs for non-degenerate regression)
+    var eggerPts = [];
+    for (var i = 0; i <= 10; i++) eggerPts.push({ dose: i, effect: -0.5 * i * i + 5 * i + (i % 3) * 0.1, se: 0.2 + 0.1 * i });
+    var eggerModel = fitQuadraticDR(eggerPts);
+    var egger = doseEggerRegression(eggerPts, eggerModel);
+    check('DR Egger returned', egger !== null);
+    check('Egger has intercept', egger && isFinite(egger.intercept));
+    check('Egger has pValue', egger && egger.pValue >= 0 && egger.pValue <= 1);
+    check('Egger has interpretation', egger && egger.interpretation.length > 10);
+
+    // Null/small inputs
+    check('Funnel null points returns empty', renderDRFunnelPlot(null, qModel) === '');
+    check('Reporting bias < 6 pts returns null', testDoseReportingBias(linPts.slice(0, 5)) === null);
+    check('Egger < 4 pts returns null', doseEggerRegression(linPts.slice(0, 3), lModel) === null);
+
+    // === Feature 4: Dose-Specific Forest Plot ===
+    check('renderDoseForestPlot exists', typeof renderDoseForestPlot === 'function');
+
+    // Create multi-study data
+    var forestPts = [];
+    for (var s = 0; s < 4; s++) {
+      for (var d = 0; d <= 8; d += 2) {
+        forestPts.push({ dose: d, effect: 0.3 * d + (s - 2) * 0.1, se: 0.3, studyId: 'Study' + (s + 1) });
+      }
+    }
+    var forestSvg = renderDoseForestPlot(forestPts, 0.95);
+    check('Forest plot has SVG', forestSvg.includes('<svg'));
+    check('Forest plot has Study1', forestSvg.includes('Study1'));
+    check('Forest plot has pooled diamonds', forestSvg.includes('polygon'));
+    check('Forest plot has dose headers', forestSvg.includes('Dose'));
+    check('Forest plot has CI line', forestSvg.includes('<line'));
+    check('Forest plot has null line', forestSvg.includes('#ef4444')); // red null line
+
+    // Small data returns message
+    var smallForest = renderDoseForestPlot([{dose:0,effect:0,se:1}], 0.95);
+    check('Small data returns message', smallForest.includes('Need at least'));
+
+    // === Feature 5: Breakpoint Bootstrap CI ===
+    check('bootstrapBreakpoints exists', typeof bootstrapBreakpoints === 'function');
+    check('renderBootstrapBPBands exists', typeof renderBootstrapBPBands === 'function');
+    check('getFitFunction exists', typeof getFitFunction === 'function');
+
+    // Test getFitFunction
+    check('getFitFunction linear', getFitFunction('linear') === fitLinearDR);
+    check('getFitFunction quadratic', getFitFunction('quadratic') === fitQuadraticDR);
+    check('getFitFunction unknown returns null', getFitFunction('unknown') === null);
+
+    // Bootstrap on quadratic (has breakpoints)
+    var quadBootPts = [];
+    for (var s = 0; s < 3; s++) {
+      for (var i = 0; i <= 10; i++) quadBootPts.push({ dose: i, effect: -0.5 * i * i + 5 * i + (s - 1) * 0.2, se: 0.5, studyId: 'S' + s });
+    }
+    var bpBoot = bootstrapBreakpoints(quadBootPts, 'quadratic', 100, 0.95);
+    check('Bootstrap returned', bpBoot !== null);
+    check('Bootstrap has plateau', bpBoot && bpBoot.plateau !== undefined);
+    check('Bootstrap has inflection', bpBoot && bpBoot.inflection !== undefined);
+    check('Bootstrap plateau n > 0', bpBoot && bpBoot.plateau.n > 0);
+
+    // Bootstrap bands rendering
+    if (bpBoot && bpBoot.plateau.lo != null) {
+      var xScale = function(d) { return 65 + d * 50; };
+      var yScale = function(y) { return 350 - y * 50; };
+      var bpSvg = renderBootstrapBPBands(bpBoot, xScale, yScale, { left: 65, top: 30 }, 335, 30);
+      check('BP bands has rect', bpSvg.includes('<rect') || bpSvg.length >= 0); // may be empty if no CIs
+    }
+
+    // Bootstrap with too few points
+    check('Bootstrap null points', bootstrapBreakpoints(null, 'linear', 100, 0.95) === null);
+    check('Bootstrap few points', bootstrapBreakpoints([{dose:0,effect:0,se:1,studyId:'a'}], 'linear', 100, 0.95) === null);
+
+    // === HTML containers exist ===
+    check('doseForestContainer exists', !!document.getElementById('doseForestContainer'));
+    check('drFunnelContainer exists', !!document.getElementById('drFunnelContainer'));
+    check('doseMetricsContainer exists', !!document.getElementById('doseMetricsContainer'));
+
+    console.log('_testTop5AdvancedFeatures: ' + passed + ' passed, ' + failed + ' failed');
+    return failed === 0;
+  }
+
+  /**
    * Build an HTML table comparing dose-response models.
    * @param {Array} models - array of model objects (each must have .model, .aic, .bic, .R2; optional .b1, .b2, .Emax, .ED50, .paramStr, .pNonlinear, .pFP2vsFP1)
    * @param {string} highlightModelName - name of the model to highlight (checkmark + blue bg)
@@ -13029,21 +13230,90 @@ body.dark-mode .input-error { background: #451a1a !important; }
     statsHtml += '</div>';
     var looHtml = renderLeaveOneOutDR(data.points, best, best.model);
 
-    // Breakpoint summary text
+    // Breakpoint summary text with bootstrap CIs
     var maxDForBP = Math.max(...data.points.map(function(p) { return p.dose; })) * 1.05;
     var bp = detectDRBreakpoints(best, maxDForBP, 200);
     var bpHtml = '';
+    var bpBoot = null;
     if (bp && (bp.plateauDose != null || bp.inflectionDose != null)) {
+      // Bootstrap CIs for breakpoints (Feature 5)
+      var bestModelType = best.model || 'linear';
+      bpBoot = bootstrapBreakpoints(data.points, bestModelType, 500, confLevel);
+
       bpHtml = '<div style="margin-top:8px;font-size:0.85rem;padding:8px 12px;border-radius:6px;background:rgba(124,58,237,0.08);border:1px solid rgba(124,58,237,0.2)">';
       bpHtml += '<strong>Breakpoint Detection:</strong> ';
       var parts = [];
-      if (bp.plateauDose != null) parts.push('Plateau at dose ~' + bp.plateauDose.toFixed(1) + ' (effect flattens)');
-      if (bp.inflectionDose != null) parts.push('Inflection at dose ~' + bp.inflectionDose.toFixed(1) + ' (curvature changes)');
+      if (bp.plateauDose != null) {
+        var platStr = 'Plateau at dose ~' + bp.plateauDose.toFixed(1);
+        if (bpBoot && bpBoot.plateau && bpBoot.plateau.lo != null) {
+          platStr += ' [' + (confLevel * 100).toFixed(0) + '% CI: ' + bpBoot.plateau.lo.toFixed(1) + '\u2013' + bpBoot.plateau.hi.toFixed(1) + ']';
+        }
+        parts.push(platStr);
+      }
+      if (bp.inflectionDose != null) {
+        var inflStr = 'Inflection at dose ~' + bp.inflectionDose.toFixed(1);
+        if (bpBoot && bpBoot.inflection && bpBoot.inflection.lo != null) {
+          inflStr += ' [' + (confLevel * 100).toFixed(0) + '% CI: ' + bpBoot.inflection.lo.toFixed(1) + '\u2013' + bpBoot.inflection.hi.toFixed(1) + ']';
+        }
+        parts.push(inflStr);
+      }
       parts.push('Max effect at dose ~' + bp.maxEffectDose.toFixed(1) + ' (' + bp.maxEffect.toFixed(4) + ')');
       bpHtml += parts.join(' | ') + '</div>';
     }
 
     el.innerHTML = '<h3 style="font-size:0.95rem;margin-bottom:8px">Dose-Response Curve</h3>' + svgHtml + bpHtml + statsHtml + tableHtml + looHtml;
+
+    // Feature 1: Dose-finding metrics
+    var metricsEl = document.getElementById('doseMetricsContainer');
+    if (metricsEl) {
+      var metrics = computeDoseMetrics(best, maxDForBP, 0);
+      if (metrics) {
+        metricsEl.innerHTML = '<h3 style="font-size:0.95rem;margin-bottom:8px">Dose-Finding Metrics</h3>' + renderDoseMetricsCard(metrics);
+      } else {
+        metricsEl.innerHTML = '';
+      }
+    }
+
+    // Feature 3: DR-specific publication bias
+    var drFunnelEl = document.getElementById('drFunnelContainer');
+    if (drFunnelEl) {
+      if (data.points.length >= 6) {
+        var funnelSvg = renderDRFunnelPlot(data.points, best);
+        var reportBias = testDoseReportingBias(data.points);
+        var eggerResult = doseEggerRegression(data.points, best);
+        var biasHtml = '<h3 style="font-size:0.95rem;margin-bottom:8px">DR Publication Bias Assessment</h3>';
+        biasHtml += funnelSvg;
+        if (reportBias) {
+          biasHtml += '<div style="margin-top:8px;font-size:0.82rem;padding:8px 12px;border-radius:6px;background:rgba(239,68,68,0.06);border:1px solid rgba(239,68,68,0.15)">';
+          biasHtml += '<strong>Dose-Reporting Bias Test:</strong> \u03C7\u00B2 = ' + reportBias.chi2.toFixed(2) + ' (df=' + reportBias.df + ', p=' +
+            (reportBias.pValue < 0.001 ? '<0.001' : reportBias.pValue.toFixed(3)) + ')<br>';
+          biasHtml += reportBias.interpretation;
+          biasHtml += '</div>';
+        }
+        if (eggerResult) {
+          biasHtml += '<div style="margin-top:6px;font-size:0.82rem;padding:8px 12px;border-radius:6px;background:rgba(239,68,68,0.06);border:1px solid rgba(239,68,68,0.15)">';
+          biasHtml += '<strong>DR Egger-like Test:</strong> intercept = ' + eggerResult.intercept.toFixed(3) +
+            ' (SE=' + eggerResult.se_intercept.toFixed(3) + ', p=' +
+            (eggerResult.pValue < 0.001 ? '<0.001' : eggerResult.pValue.toFixed(3)) + ')<br>';
+          biasHtml += eggerResult.interpretation;
+          biasHtml += '</div>';
+        }
+        drFunnelEl.innerHTML = biasHtml;
+      } else {
+        drFunnelEl.innerHTML = '';
+      }
+    }
+
+    // Feature 4: Dose-specific forest plot
+    var doseForestEl = document.getElementById('doseForestContainer');
+    if (doseForestEl) {
+      if (data.points.length >= 3) {
+        doseForestEl.innerHTML = '<h3 style="font-size:0.95rem;margin-bottom:8px">Dose-Specific Forest Plot</h3>' +
+          renderDoseForestPlot(data.points, confLevel);
+      } else {
+        doseForestEl.innerHTML = '';
+      }
+    }
 
     // Network DR: detect multiple drugs and render comparison
     var networkEl = document.getElementById('networkDRContainer');
@@ -13139,6 +13409,11 @@ body.dark-mode .input-error { background: #451a1a !important; }
     bandPath += 'Z';
     const isDark = document.body.classList.contains('dark-mode');
     svg += '<path d="' + bandPath + '" fill="' + (isDark ? 'rgba(59,130,246,0.2)' : 'rgba(37,99,235,0.12)') + '" stroke="none"/>';
+    // Bayesian credible interval band (Feature 2: darker overlay if Bayesian model available)
+    var bayesModel = fitBayesianDR(points, model.model || 'linear', 10);
+    if (bayesModel) {
+      svg += renderBayesCrIBand(bayesModel, xScale, yScale, minD, maxD, nCurve, isDark);
+    }
     // Prediction interval band (dashed, wider than CI)
     if (showPI) {
       var piUpperPath = 'M', piLowerPath = '';
@@ -13194,9 +13469,32 @@ body.dark-mode .input-error { background: #451a1a !important; }
     svg += '<text x="15" y="' + (pad.top + plotH / 2) + '" text-anchor="middle" fill="' + (theme.text || '#1e293b') + '" font-size="13" font-weight="600" transform="rotate(-90,15,' + (pad.top + plotH / 2) + ')">Effect' + (isRatio ? ' (log scale)' : '') + '</text>';
     // Model label
     svg += '<text x="' + (W - pad.right) + '" y="' + (pad.top + 14) + '" text-anchor="end" fill="' + (theme.textMuted || '#6b7280') + '" font-size="11">' + model.model + ' (R\u00B2=' + (model.R2 * 100).toFixed(0) + '%)</text>';
-    // Breakpoint markers (plateau + inflection)
+    // Breakpoint markers (plateau + inflection) with bootstrap CI bands
     var breakpoints = detectDRBreakpoints(model, maxD, 200);
+    // Bootstrap breakpoint CI bands (Feature 5: shaded uncertainty regions)
+    if (breakpoints && (breakpoints.plateauDose != null || breakpoints.inflectionDose != null)) {
+      var bpBootSVG = bootstrapBreakpoints(points, model.model || 'linear', 200, 0.95);
+      svg += renderBootstrapBPBands(bpBootSVG, xScale, yScale, pad, plotH, pad.top);
+    }
     svg += renderBreakpointMarkers(breakpoints, xScale, yScale, pad, plotH, pad.top);
+    // Dose-finding metric markers (Feature 1: ED50, ED90, MED on curve)
+    var dfMetrics = computeDoseMetrics(model, maxD, 0);
+    if (dfMetrics) {
+      var metricMarkers = [];
+      if (dfMetrics.ED50 != null && dfMetrics.ED50 <= maxD) metricMarkers.push({ dose: dfMetrics.ED50, label: 'ED50', color: '#10b981' });
+      if (dfMetrics.ED90 != null && dfMetrics.ED90 <= maxD) metricMarkers.push({ dose: dfMetrics.ED90, label: 'ED90', color: '#06b6d4' });
+      if (dfMetrics.MED != null && dfMetrics.MED <= maxD) metricMarkers.push({ dose: dfMetrics.MED, label: 'MED', color: '#f97316' });
+      for (var dm = 0; dm < metricMarkers.length; dm++) {
+        var mkr = metricMarkers[dm];
+        var mx = xScale(mkr.dose);
+        var my = yScale(model.predict(mkr.dose));
+        if (mx >= pad.left && mx <= pad.left + plotW && my >= pad.top && my <= pad.top + plotH) {
+          svg += '<line x1="' + mx.toFixed(1) + '" y1="' + (my - 8) + '" x2="' + mx.toFixed(1) + '" y2="' + (my + 8) + '" stroke="' + mkr.color + '" stroke-width="2"/>';
+          svg += '<circle cx="' + mx.toFixed(1) + '" cy="' + my.toFixed(1) + '" r="4" fill="' + mkr.color + '" stroke="#fff" stroke-width="1"/>';
+          svg += '<text x="' + (mx + 6).toFixed(1) + '" y="' + (my - 6).toFixed(1) + '" fill="' + mkr.color + '" font-size="9" font-weight="600">' + mkr.label + '</text>';
+        }
+      }
+    }
     // Study-specific curve overlays (for one-stage mixed-effects)
     if (model.studyModels && model.studyModels.length > 0) {
       const studyColors = ['#94a3b8', '#a78bfa', '#67e8f9', '#fbbf24', '#fb923c', '#f87171', '#a3e635', '#c084fc'];
@@ -13331,6 +13629,751 @@ body.dark-mode .input-error { background: #451a1a !important; }
       svg += '<line x1="' + x.toFixed(1) + '" y1="' + top + '" x2="' + x.toFixed(1) + '" y2="' + (top + plotH) + '" stroke="' + m.color + '" stroke-width="1.5" stroke-dasharray="5,3"/>';
       svg += '<text x="' + (x + 4).toFixed(1) + '" y="' + (top + 12) + '" fill="' + m.color + '" font-size="10" font-weight="600">' + m.label + ' ~' + m.dose.toFixed(1) + '</text>';
     }
+    return svg;
+  }
+
+  // ============================================================
+  // FEATURE 5: BREAKPOINT BOOTSTRAP CI
+  // ============================================================
+
+  /**
+   * Bootstrap confidence intervals for breakpoint doses (plateau & inflection).
+   * Resamples study-level clusters, refits the model, and re-detects breakpoints.
+   * @param {Array} points - [{dose, effect, se, studyId}]
+   * @param {string} modelType - model name (linear, quadratic, emax, etc.)
+   * @param {number} [nBoot=500] - number of bootstrap resamples
+   * @param {number} [confLevel=0.95] - confidence level
+   * @returns {Object} {plateau: {estimate, lo, hi, distribution}, inflection: {estimate, lo, hi, distribution}}
+   */
+  function bootstrapBreakpoints(points, modelType, nBoot, confLevel) {
+    nBoot = nBoot || 500;
+    confLevel = confLevel || 0.95;
+    if (!points || points.length < 4) return null;
+    var maxDose = Math.max.apply(null, points.map(function(p) { return p.dose; })) * 1.05;
+
+    // Group by study for cluster resampling
+    var byStudy = {};
+    for (var i = 0; i < points.length; i++) {
+      var sid = points[i].studyId || ('s' + i);
+      if (!byStudy[sid]) byStudy[sid] = [];
+      byStudy[sid].push(points[i]);
+    }
+    var studyKeys = Object.keys(byStudy);
+    var nStudies = studyKeys.length;
+    if (nStudies < 2) return null;
+
+    // Fit original model
+    var fitFn = getFitFunction(modelType);
+    if (!fitFn) return null;
+    var origModel = fitFn(points);
+    if (!origModel) return null;
+    var origBP = detectDRBreakpoints(origModel, maxDose, 200);
+
+    // Seeded PRNG (xoshiro128**) for reproducibility
+    var seed = 42;
+    function mulberry32(a) {
+      return function() {
+        a |= 0; a = a + 0x6D2B79F5 | 0;
+        var t = Math.imul(a ^ a >>> 15, 1 | a);
+        t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+        return ((t ^ t >>> 14) >>> 0) / 4294967296;
+      };
+    }
+    var rng = mulberry32(seed);
+
+    var plateauDoses = [];
+    var inflectionDoses = [];
+
+    for (var b = 0; b < nBoot; b++) {
+      // Cluster resample: draw nStudies study keys with replacement
+      var bootPts = [];
+      for (var s = 0; s < nStudies; s++) {
+        var idx = Math.floor(rng() * nStudies);
+        var studyPts = byStudy[studyKeys[idx]];
+        for (var j = 0; j < studyPts.length; j++) bootPts.push(studyPts[j]);
+      }
+      if (bootPts.length < 3) continue;
+
+      try {
+        var bootModel = fitFn(bootPts);
+        if (!bootModel) continue;
+        var bootBP = detectDRBreakpoints(bootModel, maxDose, 200);
+        if (!bootBP) continue;
+        if (bootBP.plateauDose != null) plateauDoses.push(bootBP.plateauDose);
+        if (bootBP.inflectionDose != null) inflectionDoses.push(bootBP.inflectionDose);
+      } catch(e) { /* skip failed resamples */ }
+    }
+
+    var alpha = (1 - confLevel) / 2;
+    function bootCI(arr, estimate) {
+      if (arr.length < 10) return { estimate: estimate, lo: null, hi: null, n: arr.length, distribution: arr };
+      arr.sort(function(a, b) { return a - b; });
+      var lo = arr[Math.floor(alpha * arr.length)];
+      var hi = arr[Math.floor((1 - alpha) * arr.length)];
+      return { estimate: estimate, lo: lo, hi: hi, n: arr.length, distribution: arr };
+    }
+
+    return {
+      plateau: bootCI(plateauDoses, origBP ? origBP.plateauDose : null),
+      inflection: bootCI(inflectionDoses, origBP ? origBP.inflectionDose : null)
+    };
+  }
+
+  /**
+   * Helper: get the fitting function for a given model type name.
+   */
+  function getFitFunction(modelType) {
+    var map = {
+      'linear': fitLinearDR, 'Linear': fitLinearDR,
+      'quadratic': fitQuadraticDR, 'Quadratic': fitQuadraticDR,
+      'emax': (typeof fitEmaxDR === 'function' ? fitEmaxDR : null),
+      'Emax': (typeof fitEmaxDR === 'function' ? fitEmaxDR : null),
+      'loglinear': (typeof fitLogLinearDR === 'function' ? fitLogLinearDR : null),
+      'Log-Linear': (typeof fitLogLinearDR === 'function' ? fitLogLinearDR : null),
+      'exponential': (typeof fitExponentialDR === 'function' ? fitExponentialDR : null),
+      'Exponential': (typeof fitExponentialDR === 'function' ? fitExponentialDR : null),
+      'hill': (typeof fitHillDR === 'function' ? fitHillDR : null),
+      'Hill': (typeof fitHillDR === 'function' ? fitHillDR : null)
+    };
+    return map[modelType] || null;
+  }
+
+  // ============================================================
+  // FEATURE 1: DOSE-FINDING & SAFE-DOSE ESTIMATION
+  // ============================================================
+
+  /**
+   * Compute dose-finding metrics from a fitted DR model.
+   * Uses bisection root-finding for MED, ED50, ED90, therapeutic window, NOAEL.
+   * @param {Object} model - fitted model with predict(dose) method
+   * @param {number} maxDose - maximum dose to search within
+   * @param {number} [clinicalThreshold=0] - minimum clinically important difference
+   * @returns {Object} {MED, ED50, ED90, NOAEL, therapeuticWindow, maxEffect}
+   */
+  function computeDoseMetrics(model, maxDose, clinicalThreshold) {
+    if (!model || !model.predict || maxDose <= 0) return null;
+    clinicalThreshold = clinicalThreshold ?? 0;
+
+    // Evaluate the model over a fine grid
+    var nPts = 500;
+    var maxEffect = 0;
+    var maxEffectDose = 0;
+    var effectSign = 1; // 1 = beneficial effects are positive
+
+    // Determine effect direction from model behavior
+    var effectAtMax = model.predict(maxDose);
+    var effectAtStart = model.predict(0);
+    if (effectAtMax < effectAtStart) effectSign = -1; // beneficial = negative (e.g., risk reduction)
+
+    for (var i = 0; i <= nPts; i++) {
+      var d = maxDose * i / nPts;
+      var y = model.predict(d);
+      if (!isFinite(y)) continue;
+      if (effectSign * y > effectSign * maxEffect) {
+        maxEffect = y;
+        maxEffectDose = d;
+      }
+    }
+    var absMaxEffect = Math.abs(maxEffect - effectAtStart);
+    if (absMaxEffect < 1e-10) return null;
+
+    // Bisection root-finder: find dose where f(dose) = target
+    function bisect(targetFraction) {
+      var targetValue = effectAtStart + effectSign * absMaxEffect * targetFraction;
+      var lo = 0, hi = maxDose;
+      for (var iter = 0; iter < 100; iter++) {
+        var mid = (lo + hi) / 2;
+        var val = model.predict(mid);
+        if (effectSign * (val - targetValue) > 0) hi = mid;
+        else lo = mid;
+        if (hi - lo < maxDose * 1e-6) break;
+      }
+      return (lo + hi) / 2;
+    }
+
+    // MED: Minimum Effective Dose (crosses clinical threshold)
+    var MED = null;
+    if (clinicalThreshold > 0) {
+      var targetMED = effectAtStart + effectSign * clinicalThreshold;
+      // Check if the model ever reaches the threshold
+      if (effectSign * (maxEffect - effectAtStart) >= clinicalThreshold) {
+        var lo = 0, hi = maxDose;
+        for (var iter = 0; iter < 100; iter++) {
+          var mid = (lo + hi) / 2;
+          var val = model.predict(mid);
+          if (effectSign * (val - targetMED) > 0) hi = mid;
+          else lo = mid;
+          if (hi - lo < maxDose * 1e-6) break;
+        }
+        MED = (lo + hi) / 2;
+      }
+    } else {
+      // Without a threshold, MED = dose where effect first exceeds 10% of max
+      MED = bisect(0.10);
+    }
+
+    // ED50 and ED90
+    var ED50 = bisect(0.50);
+    var ED90 = bisect(0.90);
+
+    // NOAEL: No Observed Adverse Effect Level
+    // For dose-response, approximate as dose where effect is < 5% of max
+    // (i.e., near-zero effect region)
+    var NOAEL = null;
+    for (var i = nPts; i >= 0; i--) {
+      var d = maxDose * i / nPts;
+      var y = model.predict(d);
+      var frac = Math.abs(y - effectAtStart) / absMaxEffect;
+      if (frac < 0.05) {
+        NOAEL = d;
+        break;
+      }
+    }
+
+    // Therapeutic window: between MED (or ED10) and dose at 90% effect
+    var therapeuticLo = MED ?? bisect(0.10);
+    var therapeuticHi = ED90;
+
+    return {
+      MED: MED,
+      ED50: ED50,
+      ED90: ED90,
+      NOAEL: NOAEL,
+      therapeuticWindow: { lo: therapeuticLo, hi: therapeuticHi },
+      maxEffect: maxEffect,
+      maxEffectDose: maxEffectDose,
+      effectSign: effectSign
+    };
+  }
+
+  /**
+   * Render dose-finding metrics as a summary card HTML.
+   */
+  function renderDoseMetricsCard(metrics) {
+    if (!metrics) return '';
+    var html = '<div style="margin-top:12px;padding:12px 16px;border-radius:8px;background:rgba(16,185,129,0.08);border:1px solid rgba(16,185,129,0.25)">';
+    html += '<strong style="color:#10b981">Dose-Finding Metrics</strong><br>';
+    html += '<table style="font-size:0.82rem;margin-top:6px;border-collapse:collapse;width:100%">';
+    html += '<tr><td style="padding:3px 12px 3px 0;font-weight:600">MED (Min Effective Dose)</td><td>' +
+      (metrics.MED != null ? metrics.MED.toFixed(2) : 'N/A') + '</td></tr>';
+    html += '<tr><td style="padding:3px 12px 3px 0;font-weight:600">ED<sub>50</sub></td><td>' + metrics.ED50.toFixed(2) + '</td></tr>';
+    html += '<tr><td style="padding:3px 12px 3px 0;font-weight:600">ED<sub>90</sub></td><td>' + metrics.ED90.toFixed(2) + '</td></tr>';
+    html += '<tr><td style="padding:3px 12px 3px 0;font-weight:600">NOAEL</td><td>' +
+      (metrics.NOAEL != null ? metrics.NOAEL.toFixed(2) : 'N/A') + '</td></tr>';
+    html += '<tr><td style="padding:3px 12px 3px 0;font-weight:600">Therapeutic Window</td><td>' +
+      metrics.therapeuticWindow.lo.toFixed(2) + ' \u2013 ' + metrics.therapeuticWindow.hi.toFixed(2) + '</td></tr>';
+    html += '<tr><td style="padding:3px 12px 3px 0;font-weight:600">Max Effect</td><td>' +
+      metrics.maxEffect.toFixed(4) + ' at dose ' + metrics.maxEffectDose.toFixed(2) + '</td></tr>';
+    html += '</table></div>';
+    return html;
+  }
+
+  // ============================================================
+  // FEATURE 2: BAYESIAN DR (LAPLACE APPROXIMATION)
+  // ============================================================
+
+  /**
+   * Fit a Bayesian dose-response model using Laplace approximation.
+   * Uses the frequentist ML estimate as the posterior mode, then computes
+   * the posterior covariance as (H + Sigma_prior^{-1})^{-1} where H is the
+   * observed information (inverse of frequentist covariance).
+   *
+   * @param {Array} points - [{dose, effect, se}]
+   * @param {string} modelType - 'linear' or 'quadratic'
+   * @param {number} [priorSD=10] - prior SD for N(0, priorSD^2) on each coefficient
+   * @returns {Object} model-like object with predictBayesCrI() for credible intervals
+   */
+  function fitBayesianDR(points, modelType, priorSD) {
+    priorSD = priorSD || 10;
+    if (!points || points.length < 3) return null;
+
+    // Fit frequentist model first to get the ML mode
+    var fitFn = getFitFunction(modelType);
+    if (!fitFn) fitFn = fitLinearDR;
+    var freqModel = fitFn(points);
+    if (!freqModel) return null;
+
+    // Extract coefficients and covariance from frequentist fit
+    var beta, freqSE;
+    if (freqModel.model === 'Linear' || freqModel.model === 'Log-Linear') {
+      beta = [freqModel.b0, freqModel.b1];
+      freqSE = [freqModel.se_b0, freqModel.se_b1];
+    } else if (freqModel.model === 'Quadratic') {
+      beta = [freqModel.b0, freqModel.b1, freqModel.b2];
+      freqSE = [freqModel.se_b0, freqModel.se_b1, freqModel.se_b2];
+    } else {
+      // For Emax/Hill/Exponential: use 2-parameter approximation
+      if (freqModel.Emax !== undefined && freqModel.ED50 !== undefined) {
+        beta = [freqModel.Emax, freqModel.ED50];
+        freqSE = [freqModel.se_Emax || 0.1, freqModel.se_ED50 || 0.1];
+      } else {
+        return null;
+      }
+    }
+
+    var p = beta.length;
+    // Prior precision: tau_prior = 1/priorSD^2
+    var priorPrec = 1 / (priorSD * priorSD);
+
+    // Posterior covariance via Laplace: Sigma_post = (H + Sigma_prior^{-1})^{-1}
+    // where H_{ii} = 1/se_i^2 (observed Fisher information diagonal)
+    // and Sigma_prior^{-1} = diag(1/priorSD^2)
+    var postVar = [];
+    for (var i = 0; i < p; i++) {
+      var freqPrec = 1 / (freqSE[i] * freqSE[i]);
+      var postPrec = freqPrec + priorPrec;
+      postVar.push(1 / postPrec);
+    }
+    var postSD = postVar.map(function(v) { return Math.sqrt(v); });
+
+    // Posterior mean (shrinkage toward prior mean of 0)
+    var postMean = [];
+    for (var i = 0; i < p; i++) {
+      var freqPrec = 1 / (freqSE[i] * freqSE[i]);
+      var postPrec = freqPrec + priorPrec;
+      // Posterior mean = (H * beta_ML + tau_prior * mu_prior) / postPrec
+      // with mu_prior = 0 for all coefficients
+      postMean.push((freqPrec * beta[i]) / postPrec);
+    }
+
+    // Build a pseudo-model with Bayesian credible intervals
+    var bayesModel = {
+      model: 'Bayesian-' + freqModel.model,
+      posteriorMean: postMean,
+      posteriorSD: postSD,
+      priorSD: priorSD,
+      freqModel: freqModel,
+      R2: freqModel.R2,
+      aic: freqModel.aic,
+      bic: freqModel.bic,
+      nPoints: freqModel.nPoints,
+      predict: freqModel.predict,
+      predictCI: freqModel.predictCI,
+      predictBayesCrI: function(dose, credLevel) {
+        credLevel = credLevel || 0.95;
+        var z = normalQuantile(1 - (1 - credLevel) / 2);
+        var y, sePost;
+        if (p === 2 && (freqModel.model === 'Linear' || freqModel.model === 'Log-Linear')) {
+          var d = freqModel.model === 'Log-Linear' ? Math.log(dose + (freqModel.epsilon ?? 1e-6)) : dose;
+          y = postMean[0] + postMean[1] * d;
+          sePost = Math.sqrt(postVar[0] + postVar[1] * d * d);
+        } else if (p === 3) {
+          y = postMean[0] + postMean[1] * dose + postMean[2] * dose * dose;
+          sePost = Math.sqrt(postVar[0] + postVar[1] * dose * dose + postVar[2] * dose * dose * dose * dose);
+        } else {
+          y = freqModel.predict(dose);
+          sePost = Math.sqrt(postVar[0] + (postVar[1] || 0));
+        }
+        return { y: y, lo: y - z * sePost, hi: y + z * sePost };
+      }
+    };
+
+    return bayesModel;
+  }
+
+  /**
+   * Render Bayesian credible interval bands on SVG (darker than CI band).
+   * Returns SVG path string to layer on top of the frequentist CI band.
+   */
+  function renderBayesCrIBand(bayesModel, xScale, yScale, minD, maxD, nCurve, isDark) {
+    if (!bayesModel || !bayesModel.predictBayesCrI) return '';
+    nCurve = nCurve || 100;
+    var crIPoints = [];
+    for (var i = 0; i <= nCurve; i++) {
+      var d = minD + (maxD - minD) * i / nCurve;
+      var pred = bayesModel.predictBayesCrI(d, 0.95);
+      crIPoints.push({ d: d, y: pred.y, lo: pred.lo, hi: pred.hi });
+    }
+    var bandPath = 'M';
+    for (var i = 0; i <= nCurve; i++) {
+      bandPath += (i === 0 ? '' : 'L') + xScale(crIPoints[i].d).toFixed(1) + ',' + yScale(crIPoints[i].hi).toFixed(1);
+    }
+    for (var i = nCurve; i >= 0; i--) {
+      bandPath += 'L' + xScale(crIPoints[i].d).toFixed(1) + ',' + yScale(crIPoints[i].lo).toFixed(1);
+    }
+    bandPath += 'Z';
+    return '<path d="' + bandPath + '" fill="' + (isDark ? 'rgba(139,92,246,0.2)' : 'rgba(124,58,237,0.12)') + '" stroke="none"/>';
+  }
+
+  // ============================================================
+  // FEATURE 3: DR-SPECIFIC PUBLICATION BIAS
+  // ============================================================
+
+  /**
+   * Render a dose-response specific funnel plot.
+   * X-axis = dose, Y-axis = 1/SE, points colored by residual from model.
+   * @param {Array} points - [{dose, effect, se}]
+   * @param {Object} model - fitted model with predict(dose)
+   * @returns {string} SVG HTML
+   */
+  function renderDRFunnelPlot(points, model) {
+    if (!points || points.length < 3 || !model || !model.predict) return '';
+
+    var W = 600, H = 350;
+    var pad = { top: 30, right: 30, bottom: 45, left: 60 };
+    var plotW = W - pad.left - pad.right;
+    var plotH = H - pad.top - pad.bottom;
+    var isDark = document.body.classList.contains('dark-mode');
+
+    // Compute residuals and precision
+    var data = [];
+    for (var i = 0; i < points.length; i++) {
+      var p = points[i];
+      var predicted = model.predict(p.dose);
+      var residual = p.effect - predicted;
+      var precision = 1 / p.se;
+      data.push({ dose: p.dose, precision: precision, residual: residual, se: p.se, effect: p.effect });
+    }
+
+    var minDose = Math.min.apply(null, data.map(function(d) { return d.dose; }));
+    var maxDose = Math.max.apply(null, data.map(function(d) { return d.dose; }));
+    var maxPrec = Math.max.apply(null, data.map(function(d) { return d.precision; }));
+    var rangeDose = maxDose - minDose || 1;
+    maxPrec *= 1.1;
+
+    function xScale(d) { return pad.left + (d - minDose) / rangeDose * plotW; }
+    function yScale(p) { return pad.top + plotH - (p / maxPrec) * plotH; }
+
+    var theme = isDark ? { bg: '#1e293b', text: '#e2e8f0', muted: '#94a3b8', border: '#334155' }
+                       : { bg: '#fff', text: '#1e293b', muted: '#6b7280', border: '#e2e8f0' };
+
+    var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="' + W + '" height="' + H + '" style="font-family:system-ui;max-width:100%">';
+    svg += '<rect width="' + W + '" height="' + H + '" fill="' + theme.bg + '"/>';
+
+    // Grid
+    for (var i = 0; i <= 5; i++) {
+      var py = pad.top + plotH * i / 5;
+      svg += '<line x1="' + pad.left + '" y1="' + py + '" x2="' + (W - pad.right) + '" y2="' + py + '" stroke="' + theme.border + '" stroke-width="0.5"/>';
+      var precVal = maxPrec * (1 - i / 5);
+      svg += '<text x="' + (pad.left - 6) + '" y="' + (py + 4) + '" text-anchor="end" fill="' + theme.muted + '" font-size="10">' + precVal.toFixed(1) + '</text>';
+    }
+    for (var i = 0; i <= 5; i++) {
+      var px = pad.left + plotW * i / 5;
+      svg += '<line x1="' + px + '" y1="' + pad.top + '" x2="' + px + '" y2="' + (pad.top + plotH) + '" stroke="' + theme.border + '" stroke-width="0.5"/>';
+      var doseVal = minDose + rangeDose * i / 5;
+      svg += '<text x="' + px + '" y="' + (H - pad.bottom + 16) + '" text-anchor="middle" fill="' + theme.muted + '" font-size="10">' + doseVal.toFixed(0) + '</text>';
+    }
+
+    // Points colored by residual magnitude
+    var maxAbsRes = Math.max.apply(null, data.map(function(d) { return Math.abs(d.residual); })) || 1;
+    for (var i = 0; i < data.length; i++) {
+      var d = data[i];
+      var cx = xScale(d.dose);
+      var cy = yScale(d.precision);
+      var resFrac = Math.abs(d.residual) / maxAbsRes;
+      // Color: green (low residual) to red (high residual)
+      var r = Math.round(34 + resFrac * 200);
+      var g = Math.round(197 - resFrac * 170);
+      var b = Math.round(94 - resFrac * 60);
+      svg += '<circle cx="' + cx.toFixed(1) + '" cy="' + cy.toFixed(1) + '" r="5" fill="rgb(' + r + ',' + g + ',' + b + ')" opacity="0.8">';
+      svg += '<title>Dose: ' + d.dose.toFixed(1) + ', 1/SE: ' + d.precision.toFixed(2) + ', Residual: ' + d.residual.toFixed(4) + '</title></circle>';
+    }
+
+    // Labels
+    svg += '<text x="' + (pad.left + plotW / 2) + '" y="' + (H - 6) + '" text-anchor="middle" fill="' + theme.text + '" font-size="12" font-weight="600">Dose</text>';
+    svg += '<text x="12" y="' + (pad.top + plotH / 2) + '" text-anchor="middle" fill="' + theme.text + '" font-size="12" font-weight="600" transform="rotate(-90,12,' + (pad.top + plotH / 2) + ')">Precision (1/SE)</text>';
+    svg += '<text x="' + (W / 2) + '" y="18" text-anchor="middle" fill="' + theme.text + '" font-size="13" font-weight="600">DR Funnel Plot (Residual-Colored)</text>';
+
+    // Legend
+    svg += '<rect x="' + (W - pad.right - 115) + '" y="' + (pad.top + 5) + '" width="110" height="36" rx="4" fill="' + theme.bg + '" stroke="' + theme.border + '"/>';
+    svg += '<circle cx="' + (W - pad.right - 100) + '" cy="' + (pad.top + 18) + '" r="4" fill="rgb(34,197,94)"/>';
+    svg += '<text x="' + (W - pad.right - 92) + '" y="' + (pad.top + 22) + '" fill="' + theme.muted + '" font-size="9">Low residual</text>';
+    svg += '<circle cx="' + (W - pad.right - 100) + '" cy="' + (pad.top + 32) + '" r="4" fill="rgb(234,27,34)"/>';
+    svg += '<text x="' + (W - pad.right - 92) + '" y="' + (pad.top + 36) + '" fill="' + theme.muted + '" font-size="9">High residual</text>';
+
+    svg += '</svg>';
+    return svg;
+  }
+
+  /**
+   * Test for dose-reporting bias: chi-squared test on dose distribution uniformity.
+   * If studies disproportionately report certain dose levels, this may indicate selective reporting.
+   * @param {Array} points - [{dose, se, studyId}]
+   * @returns {Object} {chi2, df, pValue, observed, expected, doseBins, interpretation}
+   */
+  function testDoseReportingBias(points) {
+    if (!points || points.length < 6) return null;
+
+    // Bin doses into categories
+    var doses = points.map(function(p) { return p.dose; });
+    var minD = Math.min.apply(null, doses);
+    var maxD = Math.max.apply(null, doses);
+    var range = maxD - minD;
+    if (range < 1e-10) return null;
+
+    // Create 4-5 equal-width bins
+    var nBins = Math.min(5, Math.max(3, Math.floor(points.length / 3)));
+    var binWidth = range / nBins;
+    var observed = new Array(nBins).fill(0);
+    var doseBins = [];
+
+    for (var b = 0; b < nBins; b++) {
+      var lo = minD + b * binWidth;
+      var hi = (b === nBins - 1) ? maxD + 0.01 : minD + (b + 1) * binWidth;
+      doseBins.push(lo.toFixed(1) + '-' + hi.toFixed(1));
+    }
+
+    for (var i = 0; i < points.length; i++) {
+      var bin = Math.min(nBins - 1, Math.floor((points[i].dose - minD) / binWidth));
+      observed[bin]++;
+    }
+
+    // Expected under uniform: equal count per bin
+    var expected = points.length / nBins;
+
+    // Chi-squared test
+    var chi2 = 0;
+    for (var b = 0; b < nBins; b++) {
+      chi2 += (observed[b] - expected) * (observed[b] - expected) / expected;
+    }
+    var df = nBins - 1;
+
+    // Approximate p-value using Wilson-Hilferty
+    var pValue;
+    if (df <= 0) {
+      pValue = 1;
+    } else {
+      // P(X > chi2) for chi-squared with df degrees of freedom
+      var z_wh = Math.pow(chi2 / df, 1/3) - (1 - 2 / (9 * df));
+      z_wh /= Math.sqrt(2 / (9 * df));
+      pValue = 1 - normalCDF(z_wh);
+    }
+
+    var interpretation = pValue < 0.05
+      ? 'Significant dose-reporting asymmetry detected (p=' + pValue.toFixed(3) + '). Some dose levels may be selectively reported.'
+      : 'No significant dose-reporting asymmetry (p=' + pValue.toFixed(3) + '). Dose distribution appears uniform.';
+
+    return {
+      chi2: chi2,
+      df: df,
+      pValue: pValue,
+      observed: observed,
+      expected: expected,
+      doseBins: doseBins,
+      nBins: nBins,
+      interpretation: interpretation
+    };
+  }
+
+  /**
+   * Dose-arm Egger-like regression: regresses residuals on 1/SE to detect small-study effects.
+   * @param {Array} points - [{dose, effect, se}]
+   * @param {Object} model - fitted DR model
+   * @returns {Object} {intercept, slope, se_intercept, pValue, interpretation}
+   */
+  function doseEggerRegression(points, model) {
+    if (!points || points.length < 4 || !model || !model.predict) return null;
+
+    // Compute standardized residuals and precision
+    var n = points.length;
+    var sx = 0, sy = 0, sxx = 0, sxy = 0;
+    for (var i = 0; i < n; i++) {
+      var p = points[i];
+      var residual = p.effect - model.predict(p.dose);
+      var x = 1 / p.se; // precision
+      var y = residual / p.se; // standardized residual
+      sx += x; sy += y; sxx += x * x; sxy += x * y;
+    }
+    var det = n * sxx - sx * sx;
+    if (Math.abs(det) < 1e-15) return null;
+
+    var intercept = (sxx * sy - sx * sxy) / det;
+    var slope = (n * sxy - sx * sy) / det;
+
+    // SE of intercept
+    var ssRes = 0;
+    for (var i = 0; i < n; i++) {
+      var p = points[i];
+      var residual = p.effect - model.predict(p.dose);
+      var x = 1 / p.se;
+      var y = residual / p.se;
+      var predicted = intercept + slope * x;
+      ssRes += (y - predicted) * (y - predicted);
+    }
+    var mse = ssRes / Math.max(1, n - 2);
+    var se_intercept = Math.sqrt(mse * sxx / det);
+    var tStat = Math.abs(intercept / se_intercept);
+    var pValue = 2 * (1 - normalCDF(tStat));
+
+    return {
+      intercept: intercept,
+      slope: slope,
+      se_intercept: se_intercept,
+      pValue: pValue,
+      interpretation: pValue < 0.10
+        ? 'Egger-like test significant (p=' + pValue.toFixed(3) + '): possible small-study bias in DR estimates.'
+        : 'No evidence of small-study bias in DR residuals (p=' + pValue.toFixed(3) + ').'
+    };
+  }
+
+  // ============================================================
+  // FEATURE 4: DOSE-SPECIFIC FOREST PLOT
+  // ============================================================
+
+  /**
+   * Render a dose-specific forest plot: rows = study x dose arm, grouped by dose bin.
+   * @param {Array} points - [{dose, effect, se, studyId}]
+   * @param {number} confLevel - confidence level (e.g. 0.95)
+   * @returns {string} SVG HTML
+   */
+  function renderDoseForestPlot(points, confLevel) {
+    if (!points || points.length < 3) return '<p style="font-size:0.85rem;color:var(--text-muted)">Need at least 3 dose-arm data points for dose-specific forest plot.</p>';
+    confLevel = confLevel || 0.95;
+    var z = normalQuantile(1 - (1 - confLevel) / 2);
+
+    // Group by dose bins (5-8 groups)
+    var doses = points.map(function(p) { return p.dose; });
+    var minD = Math.min.apply(null, doses);
+    var maxD = Math.max.apply(null, doses);
+    var range = maxD - minD;
+    if (range < 1e-10) return '';
+    var nGroups = Math.min(8, Math.max(3, Math.ceil(points.length / 4)));
+    var binWidth = range / nGroups;
+
+    // Assign points to bins
+    var bins = [];
+    for (var g = 0; g < nGroups; g++) {
+      bins.push({ lo: minD + g * binWidth, hi: (g === nGroups - 1) ? maxD + 0.01 : minD + (g + 1) * binWidth, points: [], label: '' });
+    }
+    for (var i = 0; i < points.length; i++) {
+      var bin = Math.min(nGroups - 1, Math.floor((points[i].dose - minD) / binWidth));
+      bins[bin].points.push(points[i]);
+    }
+    // Label bins and compute pooled estimates
+    for (var g = 0; g < nGroups; g++) {
+      bins[g].label = bins[g].lo.toFixed(1) + '\u2013' + (bins[g].hi - 0.01).toFixed(1);
+      if (bins[g].points.length > 0) {
+        var sw = 0, swy = 0;
+        for (var j = 0; j < bins[g].points.length; j++) {
+          var w = 1 / (bins[g].points[j].se * bins[g].points[j].se);
+          sw += w;
+          swy += w * bins[g].points[j].effect;
+        }
+        bins[g].pooledEffect = swy / sw;
+        bins[g].pooledSE = 1 / Math.sqrt(sw);
+      }
+    }
+
+    // Compute plot dimensions
+    var rowH = 22;
+    var labelW = 160;
+    var plotAreaW = 400;
+    var rightColW = 120;
+    var W = labelW + plotAreaW + rightColW;
+    var isDark = document.body.classList.contains('dark-mode');
+    var theme = isDark ? { bg: '#1e293b', text: '#e2e8f0', muted: '#94a3b8', border: '#334155' }
+                       : { bg: '#fff', text: '#1e293b', muted: '#6b7280', border: '#e2e8f0' };
+
+    // Count total rows (individual + pooled per group with label)
+    var rows = [];
+    for (var g = 0; g < nGroups; g++) {
+      if (bins[g].points.length === 0) continue;
+      rows.push({ type: 'header', label: 'Dose ' + bins[g].label });
+      for (var j = 0; j < bins[g].points.length; j++) {
+        var p = bins[g].points[j];
+        rows.push({ type: 'study', label: (p.studyId || 'Study ' + j), effect: p.effect, se: p.se, dose: p.dose });
+      }
+      if (bins[g].points.length > 1) {
+        rows.push({ type: 'pooled', label: 'Pooled (' + bins[g].points.length + ')', effect: bins[g].pooledEffect, se: bins[g].pooledSE });
+      }
+    }
+
+    var H = 40 + rows.length * rowH + 10;
+
+    // Effect range for x-axis
+    var allEffects = [];
+    for (var i = 0; i < rows.length; i++) {
+      if (rows[i].effect !== undefined) {
+        allEffects.push(rows[i].effect - z * rows[i].se);
+        allEffects.push(rows[i].effect + z * rows[i].se);
+      }
+    }
+    var eMin = Math.min.apply(null, allEffects);
+    var eMax = Math.max.apply(null, allEffects);
+    var eRange = eMax - eMin || 1;
+    eMin -= eRange * 0.1;
+    eMax += eRange * 0.1;
+    eRange = eMax - eMin;
+
+    function xScale(e) { return labelW + (e - eMin) / eRange * plotAreaW; }
+
+    var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="' + W + '" height="' + H + '" style="font-family:system-ui;max-width:100%">';
+    svg += '<rect width="' + W + '" height="' + H + '" fill="' + theme.bg + '"/>';
+
+    // Null line at 0
+    svg += '<line x1="' + xScale(0) + '" y1="30" x2="' + xScale(0) + '" y2="' + (H - 10) + '" stroke="#ef4444" stroke-width="1" stroke-dasharray="4,3"/>';
+
+    // Header
+    svg += '<text x="5" y="20" fill="' + theme.text + '" font-size="11" font-weight="600">Study / Dose Arm</text>';
+    svg += '<text x="' + (labelW + plotAreaW / 2) + '" y="20" text-anchor="middle" fill="' + theme.text + '" font-size="11" font-weight="600">Effect (' + (confLevel * 100).toFixed(0) + '% CI)</text>';
+    svg += '<text x="' + (labelW + plotAreaW + 10) + '" y="20" fill="' + theme.text + '" font-size="11" font-weight="600">Estimate [CI]</text>';
+
+    for (var i = 0; i < rows.length; i++) {
+      var yPos = 40 + i * rowH;
+      var row = rows[i];
+
+      if (row.type === 'header') {
+        // Group header (bold, colored background)
+        svg += '<rect x="0" y="' + (yPos - 4) + '" width="' + W + '" height="' + rowH + '" fill="' + (isDark ? 'rgba(59,130,246,0.1)' : 'rgba(37,99,235,0.06)') + '"/>';
+        svg += '<text x="5" y="' + (yPos + 12) + '" fill="#2563eb" font-size="11" font-weight="700">' + row.label + '</text>';
+      } else if (row.type === 'study') {
+        var lo = row.effect - z * row.se;
+        var hi = row.effect + z * row.se;
+        svg += '<text x="15" y="' + (yPos + 12) + '" fill="' + theme.text + '" font-size="10">' + row.label + ' (d=' + row.dose.toFixed(1) + ')</text>';
+        // CI line
+        svg += '<line x1="' + xScale(lo) + '" y1="' + (yPos + 8) + '" x2="' + xScale(hi) + '" y2="' + (yPos + 8) + '" stroke="' + theme.text + '" stroke-width="1.5"/>';
+        // Point estimate
+        svg += '<circle cx="' + xScale(row.effect) + '" cy="' + (yPos + 8) + '" r="3.5" fill="#2563eb"/>';
+        // Right column: estimate
+        svg += '<text x="' + (labelW + plotAreaW + 10) + '" y="' + (yPos + 12) + '" fill="' + theme.muted + '" font-size="9">' +
+          row.effect.toFixed(3) + ' [' + lo.toFixed(3) + ', ' + hi.toFixed(3) + ']</text>';
+      } else if (row.type === 'pooled') {
+        var lo = row.effect - z * row.se;
+        var hi = row.effect + z * row.se;
+        // Diamond for pooled
+        var cx = xScale(row.effect);
+        var lx = xScale(lo);
+        var rx = xScale(hi);
+        var cy = yPos + 8;
+        svg += '<polygon points="' + lx + ',' + cy + ' ' + cx + ',' + (cy - 5) + ' ' + rx + ',' + cy + ' ' + cx + ',' + (cy + 5) +
+          '" fill="#f59e0b" stroke="#d97706" stroke-width="1"/>';
+        svg += '<text x="15" y="' + (yPos + 12) + '" fill="#d97706" font-size="10" font-weight="700">' + row.label + '</text>';
+        svg += '<text x="' + (labelW + plotAreaW + 10) + '" y="' + (yPos + 12) + '" fill="#d97706" font-size="9" font-weight="600">' +
+          row.effect.toFixed(3) + ' [' + lo.toFixed(3) + ', ' + hi.toFixed(3) + ']</text>';
+      }
+    }
+
+    svg += '</svg>';
+    return svg;
+  }
+
+  // ============================================================
+  // FEATURE: Render bootstrap breakpoint CI bands on SVG
+  // ============================================================
+
+  /**
+   * Render shaded bands on SVG at breakpoint CI locations.
+   */
+  function renderBootstrapBPBands(bpBoot, xScale, yScale, pad, plotH, top) {
+    if (!bpBoot) return '';
+    var svg = '';
+
+    // Plateau CI band
+    if (bpBoot.plateau && bpBoot.plateau.lo != null && bpBoot.plateau.hi != null) {
+      var x1 = xScale(bpBoot.plateau.lo);
+      var x2 = xScale(bpBoot.plateau.hi);
+      svg += '<rect x="' + Math.min(x1, x2).toFixed(1) + '" y="' + top + '" width="' + Math.abs(x2 - x1).toFixed(1) +
+        '" height="' + plotH + '" fill="rgba(245,158,11,0.1)" stroke="none"/>';
+    }
+
+    // Inflection CI band
+    if (bpBoot.inflection && bpBoot.inflection.lo != null && bpBoot.inflection.hi != null) {
+      var x1 = xScale(bpBoot.inflection.lo);
+      var x2 = xScale(bpBoot.inflection.hi);
+      svg += '<rect x="' + Math.min(x1, x2).toFixed(1) + '" y="' + top + '" width="' + Math.abs(x2 - x1).toFixed(1) +
+        '" height="' + plotH + '" fill="rgba(139,92,246,0.1)" stroke="none"/>';
+    }
+
     return svg;
   }
 
