@@ -833,6 +833,10 @@ input:focus-visible, textarea:focus-visible {
 /* --- Validation highlight --- */
 .input-error { border-color: var(--danger) !important; background: #fef2f2 !important; }
 body.dark-mode .input-error { background: #451a1a !important; }
+body.dark-mode .badge-include { background: #032e23; color: #34d399; }
+body.dark-mode .badge-exclude { background: #451a1a; color: #f87171; }
+body.dark-mode .badge-maybe { background: #4a2008; color: #fbbf24; }
+body.dark-mode .badge-duplicate { background: #1e293b; color: #94a3b8; }
 .validation-msg { font-size: 0.72rem; color: var(--danger); padding: 2px 4px; }
 
 /* --- Loading spinner --- */
@@ -1911,19 +1915,41 @@ body.dark-mode .input-error { background: #451a1a !important; }
     setTimeout(() => el.remove(), duration);
   }
 
+  // Focus trap utility: constrains Tab within a container
+  function trapFocus(container, onEscape) {
+    function handler(e) {
+      if (e.key === 'Escape' && onEscape) { onEscape(); return; }
+      if (e.key !== 'Tab') return;
+      var focusable = container.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])');
+      if (!focusable.length) return;
+      var first = focusable[0], last = focusable[focusable.length - 1];
+      if (e.shiftKey) {
+        if (document.activeElement === first) { e.preventDefault(); last.focus(); }
+      } else {
+        if (document.activeElement === last) { e.preventDefault(); first.focus(); }
+      }
+    }
+    container.addEventListener('keydown', handler);
+    return function removeTrap() { container.removeEventListener('keydown', handler); };
+  }
+
   function showConfirm(title, message) {
     return new Promise((resolve) => {
+      var prevFocus = document.activeElement;
       document.getElementById('confirmTitle').textContent = title;
       document.getElementById('confirmMsg').textContent = message;
       const overlay = document.getElementById('confirmOverlay');
       overlay.style.display = 'flex';
       const ok = document.getElementById('confirmOk');
       const cancel = document.getElementById('confirmCancel');
+      var removeTrap = trapFocus(overlay, function() { cleanup(false); });
       function cleanup(result) {
         overlay.style.display = 'none';
         ok.removeEventListener('click', onOk);
         cancel.removeEventListener('click', onCancel);
         document.removeEventListener('keydown', onKey);
+        removeTrap();
+        if (prevFocus && prevFocus.focus) prevFocus.focus();
         resolve(result);
       }
       function onOk() { cleanup(true); }
@@ -1972,11 +1998,20 @@ body.dark-mode .input-error { background: #451a1a !important; }
   }
 
   // --- Onboarding ---
+  var _onboardPrevFocus = null;
+  var _onboardRemoveTrap = null;
   function showOnboarding() {
-    document.getElementById('onboardOverlay').style.display = 'flex';
+    _onboardPrevFocus = document.activeElement;
+    var overlay = document.getElementById('onboardOverlay');
+    overlay.style.display = 'flex';
+    _onboardRemoveTrap = trapFocus(overlay);
+    var firstBtn = overlay.querySelector('button');
+    if (firstBtn) firstBtn.focus();
   }
   function dismissOnboarding() {
     document.getElementById('onboardOverlay').style.display = 'none';
+    if (_onboardRemoveTrap) { _onboardRemoveTrap(); _onboardRemoveTrap = null; }
+    if (_onboardPrevFocus && _onboardPrevFocus.focus) { _onboardPrevFocus.focus(); _onboardPrevFocus = null; }
     try { localStorage.setItem('msa-dr-onboarded', '1'); } catch(e) { console.warn('localStorage unavailable:', e.message); }
   }
 
@@ -3199,6 +3234,8 @@ body.dark-mode .input-error { background: #451a1a !important; }
     container.innerHTML = '<table class="rob-summary-table"><thead><tr><th style="text-align:left">Study</th>' + headers + '</tr></thead><tbody>' + rows + '</tbody></table>';
   }
 
+  var _robPrevFocus = null;
+  var _robRemoveTrap = null;
   function openRoBEntry(studyId) {
     const robs = getRoBAssessments();
     const rob = robs.find(r => r.studyId === studyId);
@@ -3207,6 +3244,7 @@ body.dark-mode .input-error { background: #451a1a !important; }
     const title = document.getElementById('robEntryTitle');
     const domainsDiv = document.getElementById('robEntryDomains');
     if (!panel || !title || !domainsDiv) return;
+    if (!_robPrevFocus) _robPrevFocus = document.activeElement;
     title.textContent = 'Assessing: ' + (rob.authorYear || rob.studyId);
     let html = '';
     ROB2_DOMAINS.forEach(d => {
@@ -3222,6 +3260,12 @@ body.dark-mode .input-error { background: #451a1a !important; }
     });
     domainsDiv.innerHTML = html;
     panel.classList.add('visible');
+    panel.setAttribute('role', 'dialog');
+    panel.setAttribute('aria-modal', 'true');
+    if (_robRemoveTrap) _robRemoveTrap();
+    _robRemoveTrap = trapFocus(panel);
+    var firstBtn = panel.querySelector('button');
+    if (firstBtn) firstBtn.focus();
   }
 
   function setRoBJudgment(studyId, domain, judgment) {
@@ -3249,7 +3293,9 @@ body.dark-mode .input-error { background: #451a1a !important; }
 
   function closeRoBEntry() {
     const panel = document.getElementById('robEntryPanel');
-    if (panel) panel.classList.remove('visible');
+    if (panel) { panel.classList.remove('visible'); panel.removeAttribute('aria-modal'); }
+    if (_robRemoveTrap) { _robRemoveTrap(); _robRemoveTrap = null; }
+    if (_robPrevFocus && _robPrevFocus.focus) { _robPrevFocus.focus(); _robPrevFocus = null; }
   }
 
   function computeGRADERoBSuggestion() {
@@ -4556,16 +4602,19 @@ body.dark-mode .input-error { background: #451a1a !important; }
   let _refScrollListenerAttached = false;
 
   function _renderSingleRefItem(r) {
+    var safeId = JSON.stringify(String(r.id));
+    var validDecisions = {include:1, exclude:1, maybe:1, duplicate:1};
+    var safeDec = (r.decision && validDecisions[r.decision]) ? r.decision : '';
     return '<div class="ref-item' + (r.id === selectedRefId ? ' selected' : '') +
-      (r.decision ? ' decision-' + r.decision : '') + '"' +
-      ' data-id="' + r.id + '"' +
+      (safeDec ? ' decision-' + safeDec : '') + '"' +
+      ' data-id="' + escapeHtml(String(r.id)) + '"' +
       ' tabindex="0" role="option" aria-selected="' + (r.id === selectedRefId) + '"' +
-      ' onclick="selectReference(\'' + r.id + '\')"' +
-      ' onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();selectReference(\'' + r.id + '\')}">' +
+      ' onclick="selectReference(' + safeId + ')"' +
+      ' onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();selectReference(' + safeId + ')}">' +
       '<div class="ref-title">' + escapeHtml((r.title || 'Untitled').slice(0, 120)) + '</div>' +
       '<div class="ref-meta">' + escapeHtml((r.authors || '').split(';')[0] || '') +
         (r.year ? ' (' + escapeHtml(r.year) + ')' : '') + '</div>' +
-      (r.decision ? '<span class="badge badge-' + r.decision + '">' + r.decision + (r.autoScreened ? ' (auto)' : '') + '</span>' : '') +
+      (safeDec ? '<span class="badge badge-' + safeDec + '">' + escapeHtml(safeDec) + (r.autoScreened ? ' (auto)' : '') + '</span>' : '') +
       (autoScreenScores[r.id] && !r.decision ?
         '<span class="autoscreen-verdict ' + autoScreenScores[r.id].verdict + '">' +
           (autoScreenScores[r.id].verdict === 'auto-include' ? 'INCLUDE' :
@@ -11758,6 +11807,8 @@ body.dark-mode .input-error { background: #451a1a !important; }
       let sumSlopeResid2 = 0;
       let sumSe2 = 0;
       let countSe2 = 0;
+      let countStudiesSlope = 0;
+      let sumDoseVar = 0;
 
       for (const sid of studyKeys) {
         const pts = studyMap[sid];
@@ -11788,18 +11839,31 @@ body.dark-mode .input-error { background: #451a1a !important; }
           }
         }
 
-        // Accumulate mean se^2
+        // Accumulate mean se^2 and within-study dose variance for slope correction
+        let sumDoseVar = 0;
         for (const p of pts) {
           sumSe2 += p.se * p.se;
           countSe2++;
         }
+        // Within-study dose variance: Var(dose) = E[d^2] - E[d]^2
+        if (nk >= 2) {
+          let sd = 0, sdd = 0;
+          for (const p of pts) { sd += p.dose; sdd += p.dose * p.dose; }
+          const doseVar = sdd / nk - (sd / nk) * (sd / nk);
+          sumDoseVar += doseVar > 0 ? doseVar : 1e-10;
+        }
+        countStudiesSlope += (nk >= 2) ? 1 : 0;
       }
 
       const meanSe2 = countSe2 > 0 ? sumSe2 / countSe2 : 0;
+      // Mean within-study dose variance (for slope variance correction)
+      const meanDoseVar = countStudiesSlope > 0 ? sumDoseVar / countStudiesSlope : 1;
 
       // Update tau2 estimates (method of moments, clamped at 0)
+      // E[meanResid^2] = tau2_0 + meanSe2/nk_avg
       tau2_0 = Math.max(0, sumMeanResid2 / K - meanSe2);
-      tau2_1 = Math.max(0, sumSlopeResid2 / K - meanSe2 * 0.1);
+      // E[slopeResid^2] = tau2_1 + meanSe2/meanDoseVar (slope SE ≈ SE/sqrt(doseVar))
+      tau2_1 = Math.max(0, sumSlopeResid2 / K - meanSe2 / Math.max(meanDoseVar, 1e-10));
 
       // Update weights with new variance components
       for (let i = 0; i < n; i++) {
@@ -11811,6 +11875,20 @@ body.dark-mode .input-error { background: #451a1a !important; }
 
     // If we never got a valid fit, return null
     if (beta === null) return null;
+
+    // Compute mean within-study dose variance for marginal tau2
+    let _finalMeanDoseVar = 1;
+    { let _sdv = 0, _cnt = 0;
+      for (const sid of studyKeys) {
+        const pts = studyMap[sid];
+        if (pts.length < 2) continue;
+        let sd = 0, sdd = 0;
+        for (const p of pts) { sd += p.dose; sdd += p.dose * p.dose; }
+        const dv = sdd / pts.length - (sd / pts.length) * (sd / pts.length);
+        if (dv > 0) { _sdv += dv; _cnt++; }
+      }
+      if (_cnt > 0) _finalMeanDoseVar = _sdv / _cnt;
+    }
 
     // Goodness of fit
     let ssRes = 0, ssTot = 0, sw = 0, swy = 0;
@@ -11914,7 +11992,7 @@ body.dark-mode .input-error { background: #451a1a !important; }
       vcov: vcov,
       tau2_intercept: tau2_0,
       tau2_slope: tau2_1,
-      tau2: tau2_0 + tau2_1, // combined for PI computation
+      tau2: tau2_0 + tau2_1 * _finalMeanDoseVar, // marginal variance at typical dose spread
       R2: R2,
       aic: aic,
       bic: bic,
@@ -12209,19 +12287,20 @@ body.dark-mode .input-error { background: #451a1a !important; }
       Q += w * residuals[i] * residuals[i];
     }
 
-    // df = n_points - n_parameters
-    var nParams = 1;
+    // df = n_points - n_parameters (including intercept)
+    var nParams = 2; // default: intercept + 1 term
     var mt = model.model || '';
-    if (mt === 'Linear') nParams = 1;
-    else if (mt === 'Quadratic') nParams = 2;
-    else if (mt === 'Emax') nParams = 2;
-    else if (mt.startsWith('RCS-3')) nParams = 2;
-    else if (mt.startsWith('RCS-4')) nParams = 3;
-    else if (mt.startsWith('FP1')) nParams = 1;
-    else if (mt.startsWith('FP2')) nParams = 2;
+    if (mt === 'Linear') nParams = 2;          // b0 + b1
+    else if (mt === 'Quadratic') nParams = 3;  // b0 + b1 + b2
+    else if (mt === 'Emax') nParams = 3;       // E0 + Emax + ED50
+    else if (mt.startsWith('RCS-3')) nParams = 3; // intercept + linear + 1 spline
+    else if (mt.startsWith('RCS-4')) nParams = 4; // intercept + linear + 2 splines
+    else if (mt.startsWith('FP1')) nParams = 2;   // b0 + b1*dose^p
+    else if (mt.startsWith('FP2')) nParams = 3;   // b0 + b1*dose^p1 + b2*dose^p2
     else if (mt === 'Log-Linear') nParams = 2;
     else if (mt === 'Exponential') nParams = 2;
     else if (mt === 'Hill') nParams = 3;
+    else if (model.nParams) nParams = model.nParams; // use model-reported count
 
     var df = points.length - nParams;
     if (df <= 0) return null;
@@ -13377,7 +13456,7 @@ body.dark-mode .input-error { background: #451a1a !important; }
     const rangeD = maxD - minD || 1;
     const xScale = (d) => pad.left + ((d - minD) / rangeD) * plotW;
     const yScale = (y) => pad.top + plotH - ((y - minY) / rangeY) * plotH;
-    let svg = '<svg xmlns="http://www.w3.org/2000/svg" width="' + W + '" height="' + H + '" style="font-family:system-ui;max-width:100%">';
+    let svg = '<svg xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Dose-response curve with confidence intervals" viewBox="0 0 ' + W + ' ' + H + '" width="' + W + '" height="' + H + '" style="font-family:system-ui;max-width:100%;width:100%">';
     svg += '<rect width="' + W + '" height="' + H + '" fill="' + (theme.surface || '#fff') + '"/>';
     // Grid lines
     const nYTicks = 5, nXTicks = 6;
@@ -13756,14 +13835,11 @@ body.dark-mode .input-error { background: #451a1a !important; }
 
     // Evaluate the model over a fine grid
     var nPts = 500;
-    var maxEffect = 0;
-    var maxEffectDose = 0;
-    var effectSign = 1; // 1 = beneficial effects are positive
-
-    // Determine effect direction from model behavior
     var effectAtMax = model.predict(maxDose);
     var effectAtStart = model.predict(0);
-    if (effectAtMax < effectAtStart) effectSign = -1; // beneficial = negative (e.g., risk reduction)
+    var effectSign = effectAtMax >= effectAtStart ? 1 : -1; // 1 = beneficial effects are positive
+    var maxEffect = effectAtStart; // start from baseline, not zero
+    var maxEffectDose = 0;
 
     for (var i = 0; i <= nPts; i++) {
       var d = maxDose * i / nPts;
@@ -13905,7 +13981,9 @@ body.dark-mode .input-error { background: #451a1a !important; }
       // For Emax/Hill/Exponential: use 2-parameter approximation
       if (freqModel.Emax !== undefined && freqModel.ED50 !== undefined) {
         beta = [freqModel.Emax, freqModel.ED50];
-        freqSE = [freqModel.se_Emax || 0.1, freqModel.se_ED50 || 0.1];
+        freqSE = [freqModel.se_Emax, freqModel.se_ED50];
+        if (!freqSE[0] || !isFinite(freqSE[0]) || freqSE[0] <= 0 ||
+            !freqSE[1] || !isFinite(freqSE[1]) || freqSE[1] <= 0) return null;
       } else {
         return null;
       }
@@ -13947,7 +14025,16 @@ body.dark-mode .input-error { background: #451a1a !important; }
       aic: freqModel.aic,
       bic: freqModel.bic,
       nPoints: freqModel.nPoints,
-      predict: freqModel.predict,
+      predict: function(dose) {
+        // Use posterior mean coefficients (shrunk toward zero) for consistency with CrI
+        if (p === 2 && (freqModel.model === 'Linear' || freqModel.model === 'Log-Linear')) {
+          var d = freqModel.model === 'Log-Linear' ? Math.log(dose + (freqModel.epsilon ?? 1e-6)) : dose;
+          return postMean[0] + postMean[1] * d;
+        } else if (p === 3 && freqModel.model === 'Quadratic') {
+          return postMean[0] + postMean[1] * dose + postMean[2] * dose * dose;
+        }
+        return freqModel.predict(dose); // fallback for Emax/Hill
+      },
       predictCI: freqModel.predictCI,
       predictBayesCrI: function(dose, credLevel) {
         credLevel = credLevel || 0.95;
@@ -14037,7 +14124,7 @@ body.dark-mode .input-error { background: #451a1a !important; }
     var theme = isDark ? { bg: '#1e293b', text: '#e2e8f0', muted: '#94a3b8', border: '#334155' }
                        : { bg: '#fff', text: '#1e293b', muted: '#6b7280', border: '#e2e8f0' };
 
-    var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="' + W + '" height="' + H + '" style="font-family:system-ui;max-width:100%">';
+    var svg = '<svg xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Dose-response funnel plot" viewBox="0 0 ' + W + ' ' + H + '" width="' + W + '" height="' + H + '" style="font-family:system-ui;max-width:100%;width:100%">';
     svg += '<rect width="' + W + '" height="' + H + '" fill="' + theme.bg + '"/>';
 
     // Grid
@@ -14193,7 +14280,9 @@ body.dark-mode .input-error { background: #451a1a !important; }
     var mse = ssRes / Math.max(1, n - 2);
     var se_intercept = Math.sqrt(mse * sxx / det);
     var tStat = Math.abs(intercept / se_intercept);
-    var pValue = 2 * (1 - normalCDF(tStat));
+    // Use t-distribution with n-2 df (more conservative for small samples)
+    var dfEgger = Math.max(1, n - 2);
+    var pValue = typeof tCDFfn === 'function' ? 2 * (1 - tCDFfn(tStat, dfEgger)) : 2 * (1 - normalCDF(tStat));
 
     return {
       intercept: intercept,
@@ -14297,7 +14386,7 @@ body.dark-mode .input-error { background: #451a1a !important; }
 
     function xScale(e) { return labelW + (e - eMin) / eRange * plotAreaW; }
 
-    var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="' + W + '" height="' + H + '" style="font-family:system-ui;max-width:100%">';
+    var svg = '<svg xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Dose-specific forest plot" viewBox="0 0 ' + W + ' ' + H + '" width="' + W + '" height="' + H + '" style="font-family:system-ui;max-width:100%;width:100%">';
     svg += '<rect width="' + W + '" height="' + H + '" fill="' + theme.bg + '"/>';
 
     // Null line at 0
@@ -14315,11 +14404,11 @@ body.dark-mode .input-error { background: #451a1a !important; }
       if (row.type === 'header') {
         // Group header (bold, colored background)
         svg += '<rect x="0" y="' + (yPos - 4) + '" width="' + W + '" height="' + rowH + '" fill="' + (isDark ? 'rgba(59,130,246,0.1)' : 'rgba(37,99,235,0.06)') + '"/>';
-        svg += '<text x="5" y="' + (yPos + 12) + '" fill="#2563eb" font-size="11" font-weight="700">' + row.label + '</text>';
+        svg += '<text x="5" y="' + (yPos + 12) + '" fill="#2563eb" font-size="11" font-weight="700">' + escapeHtml(row.label) + '</text>';
       } else if (row.type === 'study') {
         var lo = row.effect - z * row.se;
         var hi = row.effect + z * row.se;
-        svg += '<text x="15" y="' + (yPos + 12) + '" fill="' + theme.text + '" font-size="10">' + row.label + ' (d=' + row.dose.toFixed(1) + ')</text>';
+        svg += '<text x="15" y="' + (yPos + 12) + '" fill="' + theme.text + '" font-size="10">' + escapeHtml(row.label) + ' (d=' + row.dose.toFixed(1) + ')</text>';
         // CI line
         svg += '<line x1="' + xScale(lo) + '" y1="' + (yPos + 8) + '" x2="' + xScale(hi) + '" y2="' + (yPos + 8) + '" stroke="' + theme.text + '" stroke-width="1.5"/>';
         // Point estimate
@@ -14337,7 +14426,7 @@ body.dark-mode .input-error { background: #451a1a !important; }
         var cy = yPos + 8;
         svg += '<polygon points="' + lx + ',' + cy + ' ' + cx + ',' + (cy - 5) + ' ' + rx + ',' + cy + ' ' + cx + ',' + (cy + 5) +
           '" fill="#f59e0b" stroke="#d97706" stroke-width="1"/>';
-        svg += '<text x="15" y="' + (yPos + 12) + '" fill="#d97706" font-size="10" font-weight="700">' + row.label + '</text>';
+        svg += '<text x="15" y="' + (yPos + 12) + '" fill="#d97706" font-size="10" font-weight="700">' + escapeHtml(row.label) + '</text>';
         svg += '<text x="' + (labelW + plotAreaW + 10) + '" y="' + (yPos + 12) + '" fill="#d97706" font-size="9" font-weight="600">' +
           row.effect.toFixed(3) + ' [' + lo.toFixed(3) + ', ' + hi.toFixed(3) + ']</text>';
       }
@@ -14500,7 +14589,7 @@ body.dark-mode .input-error { background: #451a1a !important; }
     const xScale = (d) => pad.left + (d / rangeD) * plotW;
     const yScale = (y) => pad.top + plotH - ((y - minY) / rangeY) * plotH;
 
-    let svg = '<svg xmlns="http://www.w3.org/2000/svg" width="' + W + '" height="' + H + '" style="font-family:system-ui;max-width:100%">';
+    let svg = '<svg xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Network dose-response comparison" viewBox="0 0 ' + W + ' ' + H + '" width="' + W + '" height="' + H + '" style="font-family:system-ui;max-width:100%;width:100%">';
     svg += '<rect width="' + W + '" height="' + H + '" fill="' + (theme.surface || '#fff') + '"/>';
     // Grid
     for (let i = 0; i <= 5; i++) {
@@ -15847,7 +15936,8 @@ body.dark-mode .input-error { background: #451a1a !important; }
       : 'No registry match';
     const sourceTag = ((trial?.source || '').toLowerCase() === 'aact') ? 'aact' : 'ctgov';
     const enroll = trial?.enrollment ?? null;
-    const nTotal = (study.nTotal ?? ((study.totalInt ?? 0) + (study.totalCtrl ?? 0))) || null;
+    const _nRaw = study.nTotal ?? ((study.totalInt ?? 0) + (study.totalCtrl ?? 0));
+    const nTotal = (_nRaw != null && _nRaw > 0) ? _nRaw : null;
     const nMismatch = (enroll != null && nTotal != null && Math.abs(enroll - nTotal) > Math.max(20, enroll * 0.1));
     const trialOutcomesRaw = (trial?.primaryOutcomes || []).map(o => String(o || '').trim()).filter(Boolean);
     const trialOutcomes = trialOutcomesRaw.map(o => o.toLowerCase());
@@ -23002,10 +23092,12 @@ body.dark-mode .input-error { background: #451a1a !important; }
   }
 
   let _extractorPrevFocus = null;
+  let _extractorRemoveTrap = null;
   function showExtractorModal() {
     _extractorPrevFocus = document.activeElement;
     const overlay = document.getElementById('extractorOverlay');
     overlay.style.display = 'flex';
+    _extractorRemoveTrap = trapFocus(overlay, closeExtractorModal);
     document.getElementById('extractorText').value = '';
     const statusEl = document.getElementById('extractorStatus');
     const fileInput = document.getElementById('extractorFile');
@@ -23023,6 +23115,7 @@ body.dark-mode .input-error { background: #451a1a !important; }
 
   function closeExtractorModal() {
     document.getElementById('extractorOverlay').style.display = 'none';
+    if (_extractorRemoveTrap) { _extractorRemoveTrap(); _extractorRemoveTrap = null; }
     if (_extractorPrevFocus) { _extractorPrevFocus.focus(); _extractorPrevFocus = null; }
   }
 
