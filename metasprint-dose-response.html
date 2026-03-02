@@ -1463,6 +1463,9 @@ body.dark-mode .input-error { background: #451a1a !important; }
           <option value="rcs4">RCS (4 knots)</option>
           <option value="fp1">FP1 (best 1st-degree)</option>
           <option value="fp2">FP2 (best 2nd-degree)</option>
+          <option value="loglinear">Log-Linear</option>
+          <option value="exponential">Exponential</option>
+          <option value="hill">Hill (3-param Emax)</option>
         </select>
         <label style="font-size:0.82rem;margin-left:12px;cursor:pointer" title="Fit all studies simultaneously with random effects">
           <input type="checkbox" id="drOneStageToggle"> One-stage mixed-effects
@@ -10126,6 +10129,84 @@ body.dark-mode .input-error { background: #451a1a !important; }
   }
 
   /**
+   * Self-test for log-linear, exponential, and Hill (3-param Emax) models.
+   */
+  function _testNewModels() {
+    var passed = 0, failed = 0;
+    function approxEq(a, b, tol) { return Math.abs(a - b) < (tol ?? 0.05); }
+    function check(name, cond) {
+      if (cond) passed++;
+      else { failed++; console.warn('NewModels FAIL:', name); }
+    }
+
+    // Test log-linear
+    {
+      var pts = [];
+      for (var i = 1; i <= 6; i++) {
+        var dose = i * 10;
+        pts.push({dose: dose, effect: -0.08 * Math.log(dose), se: 0.05});
+      }
+      var fit = fitLogLinearDR(pts);
+      check('log-linear returns result', fit !== null);
+      check('log-linear has predict', fit && typeof fit.predict === 'function');
+      check('log-linear has predictCI', fit && typeof fit.predictCI === 'function');
+      check('log-linear AIC finite', fit && isFinite(fit.aic));
+      check('log-linear coef b1 negative', fit && fit.coefficients[1] < 0);
+      check('log-linear model name', fit && fit.model === 'Log-Linear');
+      check('log-linear R2 defined', fit && isFinite(fit.R2));
+      check('log-linear has residuals', fit && fit.residuals && fit.residuals.length === 6);
+    }
+
+    // Test exponential
+    {
+      var pts = [];
+      var trueEmax = -0.5, trueAlpha = 0.05;
+      for (var i = 1; i <= 6; i++) {
+        var dose = i * 10;
+        var eff = trueEmax * (1 - Math.exp(-trueAlpha * dose));
+        pts.push({dose: dose, effect: eff, se: 0.03});
+      }
+      var fit = fitExponentialDR(pts);
+      check('exponential returns result', fit !== null);
+      check('exponential Emax recovery', fit && approxEq(fit.Emax, trueEmax, 0.15));
+      check('exponential alpha recovery', fit && approxEq(fit.alpha, trueAlpha, 0.02));
+      check('exponential has predictCI', fit && typeof fit.predictCI === 'function');
+      check('exponential AIC finite', fit && isFinite(fit.aic));
+      check('exponential model name', fit && fit.model === 'Exponential');
+      check('exponential R2 defined', fit && isFinite(fit.R2));
+      check('exponential has residuals', fit && fit.residuals && fit.residuals.length === 6);
+      check('exponential min points', fitExponentialDR([{dose:1,effect:0,se:0.1},{dose:2,effect:0,se:0.1}]) === null);
+    }
+
+    // Test Hill
+    {
+      var pts = [];
+      var trueEmax = -0.6, trueED50 = 20, trueH = 1.5;
+      for (var i = 1; i <= 7; i++) {
+        var dose = i * 10;
+        var dh = Math.pow(dose, trueH);
+        var eff = trueEmax * dh / (Math.pow(trueED50, trueH) + dh);
+        pts.push({dose: dose, effect: eff, se: 0.02});
+      }
+      var fit = fitHillDR(pts);
+      check('hill returns result', fit !== null);
+      check('hill Emax recovery', fit && approxEq(fit.Emax, trueEmax, 0.2));
+      check('hill ED50 recovery', fit && approxEq(fit.ED50, trueED50, 8));
+      check('hill h recovery', fit && approxEq(fit.h, trueH, 0.8));
+      check('hill has predictCI', fit && typeof fit.predictCI === 'function');
+      check('hill AIC finite', fit && isFinite(fit.aic));
+      check('hill model name', fit && fit.model === 'Hill');
+      check('hill R2 defined', fit && isFinite(fit.R2));
+      check('hill has residuals', fit && fit.residuals && fit.residuals.length === 7);
+      // Hill with h=1 should be similar to Emax
+      check('hill min points', fitHillDR([{dose:1,effect:0,se:0.1},{dose:2,effect:0,se:0.1}]) === null);
+    }
+
+    console.log('_testNewModels: ' + passed + ' passed, ' + failed + ' failed');
+    return failed === 0;
+  }
+
+  /**
    * Self-test for continuous input mode (Mean/SD/N per dose).
    * Verifies that prepareDoseResponseData correctly computes MD from raw data.
    */
@@ -10506,6 +10587,411 @@ body.dark-mode .input-error { background: #451a1a !important; }
       paramStr: 'b0=' + b0.toFixed(4) + ', b1=' + b1.toFixed(4) + ', b2=' + b2.toFixed(4) +
                 ', p1=' + label1 + ', p2=' + label2
     };
+  }
+
+  // ====================================================================
+  // Log-linear dose-response model: y = b0 + b1 * log(dose + epsilon)
+  // Common in epidemiology for alcohol, dietary intake, etc.
+  // ====================================================================
+  function fitLogLinearDR(points, epsilon) {
+    if (!points || points.length < 2) return null;
+    var eps = epsilon ?? 1e-6;
+    var n = points.length;
+
+    // Transform dose to log scale
+    var X = [], yArr = [], W = [];
+    for (var i = 0; i < n; i++) {
+      X.push([1, Math.log(points[i].dose + eps)]);
+      yArr.push(points[i].effect);
+      W.push(1 / (points[i].se * points[i].se));
+    }
+
+    var fit = wlsFit(X, yArr, W);
+    if (!fit) return null;
+
+    var b0 = fit.beta[0], b1 = fit.beta[1];
+    var k = 2; // parameters
+
+    // Compute R-squared (weighted)
+    var wSum = 0, wYsum = 0;
+    for (var i = 0; i < n; i++) { wSum += W[i]; wYsum += W[i] * yArr[i]; }
+    var yBar = wYsum / wSum;
+    var ssTot = 0;
+    for (var i = 0; i < n; i++) ssTot += W[i] * (yArr[i] - yBar) * (yArr[i] - yBar);
+    var R2 = ssTot > 0 ? 1 - fit.sse / ssTot : 0;
+
+    var se_b0 = Math.sqrt(Math.max(fit.vcov[0][0], 0));
+    var se_b1 = Math.sqrt(Math.max(fit.vcov[1][1], 0));
+
+    return {
+      model: 'Log-Linear',
+      type: 'log-linear',
+      b0: b0,
+      b1: b1,
+      coefficients: [b0, b1],
+      se: [se_b0, se_b1],
+      se_b0: se_b0,
+      se_b1: se_b1,
+      vcov: fit.vcov,
+      R2: R2,
+      aic: n * Math.log(Math.max(fit.sse / n, 1e-30)) + 2 * k,
+      bic: n * Math.log(Math.max(fit.sse / n, 1e-30)) + k * Math.log(n),
+      sse: fit.sse,
+      fitted: fit.fitted,
+      residuals: fit.residuals,
+      nPoints: n,
+      predict: function(dose) {
+        return b0 + b1 * Math.log(dose + eps);
+      },
+      predictCI: function(dose, zCrit) {
+        var d = dose + eps;
+        var xVec = [1, Math.log(d)];
+        var yh = b0 + b1 * Math.log(d);
+        var varY = 0;
+        for (var ii = 0; ii < 2; ii++)
+          for (var jj = 0; jj < 2; jj++)
+            varY += xVec[ii] * fit.vcov[ii][jj] * xVec[jj];
+        var seh = Math.sqrt(Math.max(0, varY));
+        return { y: yh, lo: yh - zCrit * seh, hi: yh + zCrit * seh };
+      },
+      paramStr: 'b0=' + b0.toFixed(4) + ', b1=' + b1.toFixed(4) + ' (log-linear)',
+      epsilon: eps
+    };
+  }
+
+  // ====================================================================
+  // Exponential dose-response: y = Emax * (1 - exp(-alpha * dose))
+  // Fitted via Gauss-Newton iterative WLS (2 parameters: Emax, alpha)
+  // ====================================================================
+  function fitExponentialDR(points) {
+    if (!points || points.length < 3) return null;
+    var n = points.length;
+    var doses = [], yArr = [], W = [];
+    for (var i = 0; i < n; i++) {
+      doses.push(points[i].dose);
+      yArr.push(points[i].effect);
+      W.push(1 / (points[i].se * points[i].se));
+    }
+
+    // Initialize: Emax = extreme effect, alpha from median dose
+    var Emax = yArr[0], alpha = 0.05;
+    for (var i = 1; i < n; i++) {
+      if (Math.abs(yArr[i]) > Math.abs(Emax)) Emax = yArr[i];
+    }
+    Emax = Emax * 1.2 || -0.5;
+    var medDose = doses[Math.floor(n / 2)] || 10;
+    alpha = -Math.log(0.5) / medDose;
+    if (alpha <= 0) alpha = 0.05;
+
+    var maxIter = 100, tol = 1e-8;
+
+    for (var iter = 0; iter < maxIter; iter++) {
+      var JtWJ = [[0, 0], [0, 0]];
+      var JtWr = [0, 0];
+      for (var i = 0; i < n; i++) {
+        var d = doses[i];
+        var expTerm = Math.exp(-alpha * d);
+        var pred = Emax * (1 - expTerm);
+        var r = yArr[i] - pred;
+        var j0 = 1 - expTerm;          // d/dEmax
+        var j1 = Emax * d * expTerm;   // d/dalpha
+        JtWJ[0][0] += j0 * W[i] * j0;
+        JtWJ[0][1] += j0 * W[i] * j1;
+        JtWJ[1][0] += j1 * W[i] * j0;
+        JtWJ[1][1] += j1 * W[i] * j1;
+        JtWr[0] += j0 * W[i] * r;
+        JtWr[1] += j1 * W[i] * r;
+      }
+      var det = JtWJ[0][0] * JtWJ[1][1] - JtWJ[0][1] * JtWJ[1][0];
+      if (Math.abs(det) < 1e-20) break;
+      var d0 = (JtWJ[1][1] * JtWr[0] - JtWJ[0][1] * JtWr[1]) / det;
+      var d1 = (JtWJ[0][0] * JtWr[1] - JtWJ[1][0] * JtWr[0]) / det;
+
+      Emax += d0;
+      alpha += d1;
+      if (alpha < 1e-10) alpha = 1e-10;
+      if (Math.abs(d0) + Math.abs(d1) < tol) break;
+    }
+
+    // Final WSS, fitted values, and residuals
+    var wss = 0;
+    var fitted = new Array(n);
+    var residuals = new Array(n);
+    for (var i = 0; i < n; i++) {
+      var pred = Emax * (1 - Math.exp(-alpha * doses[i]));
+      fitted[i] = pred;
+      residuals[i] = yArr[i] - pred;
+      wss += W[i] * residuals[i] * residuals[i];
+    }
+
+    // R-squared (weighted)
+    var wSum = 0, wYsum = 0;
+    for (var i = 0; i < n; i++) { wSum += W[i]; wYsum += W[i] * yArr[i]; }
+    var yBar = wYsum / wSum;
+    var ssTot = 0;
+    for (var i = 0; i < n; i++) ssTot += W[i] * (yArr[i] - yBar) * (yArr[i] - yBar);
+    var R2 = ssTot > 0 ? 1 - wss / ssTot : 0;
+
+    // Vcov from final Jacobian
+    var JtWJf = [[0, 0], [0, 0]];
+    for (var i = 0; i < n; i++) {
+      var d = doses[i];
+      var expTerm = Math.exp(-alpha * d);
+      var j0 = 1 - expTerm;
+      var j1 = Emax * d * expTerm;
+      JtWJf[0][0] += j0 * W[i] * j0;
+      JtWJf[0][1] += j0 * W[i] * j1;
+      JtWJf[1][0] += j1 * W[i] * j0;
+      JtWJf[1][1] += j1 * W[i] * j1;
+    }
+    var detF = JtWJf[0][0] * JtWJf[1][1] - JtWJf[0][1] * JtWJf[1][0];
+    var vcov = null, se = [NaN, NaN];
+    if (Math.abs(detF) > 1e-20) {
+      vcov = [
+        [JtWJf[1][1] / detF, -JtWJf[0][1] / detF],
+        [-JtWJf[1][0] / detF, JtWJf[0][0] / detF]
+      ];
+      se = [Math.sqrt(Math.max(vcov[0][0], 0)), Math.sqrt(Math.max(vcov[1][1], 0))];
+    }
+
+    var k = 2;
+    var aicVal = n * Math.log(Math.max(wss / n, 1e-30)) + 2 * k;
+    var emaxFinal = Emax, alphaFinal = alpha;
+
+    return {
+      model: 'Exponential',
+      type: 'exponential',
+      Emax: emaxFinal,
+      alpha: alphaFinal,
+      coefficients: [emaxFinal, alphaFinal],
+      se: se,
+      se_Emax: se[0],
+      se_alpha: se[1],
+      vcov: vcov,
+      R2: R2,
+      aic: aicVal,
+      bic: n * Math.log(Math.max(wss / n, 1e-30)) + k * Math.log(n),
+      sse: wss,
+      fitted: fitted,
+      residuals: residuals,
+      nPoints: n,
+      predict: function(dose) {
+        return emaxFinal * (1 - Math.exp(-alphaFinal * dose));
+      },
+      predictCI: function(dose, zCrit) {
+        var d = dose;
+        var expT = Math.exp(-alphaFinal * d);
+        var yh = emaxFinal * (1 - expT);
+        // Jacobian row at this dose
+        var jVec = [1 - expT, emaxFinal * d * expT];
+        var varY = 0;
+        if (vcov) {
+          for (var ii = 0; ii < 2; ii++)
+            for (var jj = 0; jj < 2; jj++)
+              varY += jVec[ii] * vcov[ii][jj] * jVec[jj];
+        }
+        var seh = Math.sqrt(Math.max(0, varY));
+        return { y: yh, lo: yh - zCrit * seh, hi: yh + zCrit * seh };
+      },
+      paramStr: 'Emax=' + emaxFinal.toFixed(4) + ', alpha=' + alphaFinal.toFixed(4)
+    };
+  }
+
+  // ====================================================================
+  // 3-parameter Emax (Hill) model: y = Emax * dose^h / (ED50^h + dose^h)
+  // h=1 gives standard Emax; h>1 sigmoidal; h<1 sub-linear
+  // Fitted via Gauss-Newton with grid search over h
+  // ====================================================================
+  function fitHillDR(points) {
+    if (!points || points.length < 4) return null; // need 4+ for 3 params
+    var n = points.length;
+    var doses = [], yArr = [], W = [];
+    for (var i = 0; i < n; i++) {
+      doses.push(points[i].dose);
+      yArr.push(points[i].effect);
+      W.push(1 / (points[i].se * points[i].se));
+    }
+
+    var hGrid = [0.5, 0.75, 1, 1.5, 2, 3];
+    var bestResult = null, bestWSS = Infinity;
+
+    for (var gi = 0; gi < hGrid.length; gi++) {
+      var res = _hillGN(doses, yArr, W, n, hGrid[gi]);
+      if (res && res.wss < bestWSS) {
+        bestWSS = res.wss;
+        bestResult = res;
+      }
+    }
+
+    if (!bestResult) return null;
+
+    var Em = bestResult.Emax, Ed = bestResult.ED50, hh = bestResult.h;
+    var k = 3;
+    var aicVal = n * Math.log(Math.max(bestWSS / n, 1e-30)) + 2 * k;
+
+    // Compute fitted values and residuals
+    var fitted = new Array(n);
+    var residuals = new Array(n);
+    for (var i = 0; i < n; i++) {
+      var dh = Math.pow(doses[i], hh);
+      fitted[i] = Em * dh / (Math.pow(Ed, hh) + dh);
+      residuals[i] = yArr[i] - fitted[i];
+    }
+
+    // R-squared (weighted)
+    var wSum = 0, wYsum = 0;
+    for (var i = 0; i < n; i++) { wSum += W[i]; wYsum += W[i] * yArr[i]; }
+    var yBar = wYsum / wSum;
+    var ssTot = 0;
+    for (var i = 0; i < n; i++) ssTot += W[i] * (yArr[i] - yBar) * (yArr[i] - yBar);
+    var R2 = ssTot > 0 ? 1 - bestWSS / ssTot : 0;
+
+    return {
+      model: 'Hill',
+      type: 'hill',
+      Emax: Em,
+      ED50: Ed,
+      h: hh,
+      coefficients: [Em, Ed, hh],
+      se: bestResult.se,
+      se_Emax: bestResult.se[0],
+      se_ED50: bestResult.se[1],
+      se_h: bestResult.se[2],
+      vcov: bestResult.vcov,
+      R2: R2,
+      aic: aicVal,
+      bic: n * Math.log(Math.max(bestWSS / n, 1e-30)) + k * Math.log(n),
+      sse: bestWSS,
+      fitted: fitted,
+      residuals: residuals,
+      nPoints: n,
+      predict: function(dose) {
+        var dh = Math.pow(dose, hh);
+        return Em * dh / (Math.pow(Ed, hh) + dh);
+      },
+      predictCI: function(dose, zCrit) {
+        var d = dose;
+        var dh = Math.pow(d, hh);
+        var e50h = Math.pow(Ed, hh);
+        var denom = e50h + dh;
+        var yh = Em * dh / denom;
+        // Jacobian: [dEmax, dED50, dh]
+        var logD = d > 0 ? Math.log(d) : 0;
+        var logE = Ed > 0 ? Math.log(Ed) : 0;
+        var jVec = [
+          dh / denom,
+          -Em * dh * hh * Math.pow(Ed, hh - 1) / (denom * denom),
+          Em * dh * e50h * (logD - logE) / (denom * denom)
+        ];
+        var varY = 0;
+        if (bestResult.vcov) {
+          for (var ii = 0; ii < 3; ii++)
+            for (var jj = 0; jj < 3; jj++)
+              varY += jVec[ii] * bestResult.vcov[ii][jj] * jVec[jj];
+        }
+        var seh = Math.sqrt(Math.max(0, varY));
+        return { y: yh, lo: yh - zCrit * seh, hi: yh + zCrit * seh };
+      },
+      paramStr: 'Emax=' + Em.toFixed(4) + ', ED50=' + Ed.toFixed(4) + ', h=' + hh.toFixed(3)
+    };
+  }
+
+  // Internal Gauss-Newton for Hill model
+  function _hillGN(doses, y, W, n, hInit) {
+    var Emax = y[0];
+    for (var i = 1; i < n; i++) {
+      if (Math.abs(y[i]) > Math.abs(Emax)) Emax = y[i];
+    }
+    Emax = Emax * 1.2 || -0.5;
+    var ED50 = doses[Math.floor(n / 2)] || 10;
+    if (ED50 <= 0) ED50 = 10;
+    var h = hInit;
+
+    var maxIter = 100, tol = 1e-8;
+
+    for (var iter = 0; iter < maxIter; iter++) {
+      var JtWJ = [[0,0,0],[0,0,0],[0,0,0]];
+      var JtWr = [0, 0, 0];
+      for (var i = 0; i < n; i++) {
+        var d = doses[i];
+        var dh = Math.pow(d, h);
+        var e50h = Math.pow(ED50, h);
+        var denom = e50h + dh;
+        if (Math.abs(denom) < 1e-30) return null;
+        var pred = Emax * dh / denom;
+        var r = y[i] - pred;
+
+        var logD = d > 0 ? Math.log(d) : 0;
+        var logE = ED50 > 0 ? Math.log(ED50) : 0;
+        var J = [
+          dh / denom,                                          // dEmax
+          -Emax * dh * h * Math.pow(ED50, h - 1) / (denom * denom), // dED50
+          Emax * dh * e50h * (logD - logE) / (denom * denom)  // dh
+        ];
+
+        for (var a = 0; a < 3; a++) {
+          JtWr[a] += J[a] * W[i] * r;
+          for (var b = 0; b < 3; b++) {
+            JtWJ[a][b] += J[a] * W[i] * J[b];
+          }
+        }
+      }
+
+      var inv = matInvertNxN(JtWJ);
+      if (!inv) break;
+
+      var delta = [0, 0, 0];
+      for (var a = 0; a < 3; a++)
+        for (var b = 0; b < 3; b++)
+          delta[a] += inv[a][b] * JtWr[b];
+
+      // Damped step
+      var step = 1;
+      for (var s = 0; s < 5; s++) {
+        var ne = Emax + step * delta[0];
+        var nd = ED50 + step * delta[1];
+        var nh = h + step * delta[2];
+        if (nd > 0 && nh > 0.1 && nh < 10) {
+          Emax = ne; ED50 = nd; h = nh;
+          break;
+        }
+        step *= 0.5;
+      }
+
+      if (Math.abs(delta[0]) + Math.abs(delta[1]) + Math.abs(delta[2]) < tol) break;
+    }
+
+    // Final WSS
+    var wss = 0;
+    for (var i = 0; i < n; i++) {
+      var dh = Math.pow(doses[i], h);
+      var pred = Emax * dh / (Math.pow(ED50, h) + dh);
+      wss += W[i] * (y[i] - pred) * (y[i] - pred);
+    }
+
+    // Vcov from final Jacobian
+    var JtWJf = [[0,0,0],[0,0,0],[0,0,0]];
+    for (var i = 0; i < n; i++) {
+      var d = doses[i], dhi = Math.pow(d, h), e50h = Math.pow(ED50, h);
+      var denom = e50h + dhi;
+      var logD = d > 0 ? Math.log(d) : 0, logE = ED50 > 0 ? Math.log(ED50) : 0;
+      var J = [
+        dhi / denom,
+        -Emax * dhi * h * Math.pow(ED50, h - 1) / (denom * denom),
+        Emax * dhi * e50h * (logD - logE) / (denom * denom)
+      ];
+      for (var a = 0; a < 3; a++)
+        for (var b = 0; b < 3; b++)
+          JtWJf[a][b] += J[a] * W[i] * J[b];
+    }
+    var vcov = matInvertNxN(JtWJf);
+    var se = vcov ? [
+      Math.sqrt(Math.max(vcov[0][0], 0)),
+      Math.sqrt(Math.max(vcov[1][1], 0)),
+      Math.sqrt(Math.max(vcov[2][2], 0))
+    ] : [NaN, NaN, NaN];
+
+    return { Emax: Emax, ED50: ED50, h: h, wss: wss, se: se, vcov: vcov };
   }
 
   /**
@@ -11407,6 +11893,7 @@ body.dark-mode .input-error { background: #451a1a !important; }
     try { results.glCovariance = _testGLCovariance(); } catch(e) { results.glCovariance = false; console.error('GL Covariance tests error:', e); }
     try { results.glsFit = _testGLSFit(); } catch(e) { results.glsFit = false; console.error('GLS Fit tests error:', e); }
     try { results.mlReml = _testMLREML(); } catch(e) { results.mlReml = false; console.error('ML/REML tests error:', e); }
+    try { results.newModels = _testNewModels(); } catch(e) { results.newModels = false; console.error('NewModels tests error:', e); }
 
     console.log('=== Results ===');
     console.table(results);
@@ -11446,6 +11933,9 @@ body.dark-mode .input-error { background: #451a1a !important; }
     else if (mt.startsWith('RCS-4')) nParams = 3;
     else if (mt.startsWith('FP1')) nParams = 1;
     else if (mt.startsWith('FP2')) nParams = 2;
+    else if (mt === 'Log-Linear') nParams = 2;
+    else if (mt === 'Exponential') nParams = 2;
+    else if (mt === 'Hill') nParams = 3;
 
     var df = points.length - nParams;
     if (df <= 0) return null;
@@ -11477,6 +11967,10 @@ body.dark-mode .input-error { background: #451a1a !important; }
     if (fp1) models.push(fp1);
     const fp2 = fitFP2DR(points);
     if (fp2) models.push(fp2);
+    // Log-linear, exponential, and Hill models
+    try { var loglin = fitLogLinearDR(points); if (loglin) models.push(loglin); } catch(e) {}
+    try { var expo = fitExponentialDR(points); if (expo) models.push(expo); } catch(e) {}
+    try { var hill = fitHillDR(points); if (hill) models.push(hill); } catch(e) {}
     if (models.length === 0) return null;
     models.sort((a, b) => a.aic - b.aic);
     // AIC model averaging weights (Burnham & Anderson 2002)
@@ -11736,6 +12230,7 @@ body.dark-mode .input-error { background: #451a1a !important; }
       const modelMap = {
         linear: 'Linear', quadratic: 'Quadratic', emax: 'Emax',
         rcs3: 'RCS-3', rcs4: 'RCS-4',
+        loglinear: 'Log-Linear', exponential: 'Exponential', hill: 'Hill',
         fp1: null, fp2: null // FP models have dynamic names like FP1(0.5)
       };
       if (userChoice === 'fp1') {
@@ -11768,6 +12263,19 @@ body.dark-mode .input-error { background: #451a1a !important; }
       statsHtml += 'E<sub>max</sub>: ' + best.Emax.toFixed(3) + ' (SE ' + best.se_Emax.toFixed(4) + ')<br>';
       statsHtml += 'ED<sub>50</sub>: ' + best.ED50.toFixed(1) + ' (dose at 50% of maximum effect)<br>';
       statsHtml += 'Predicted effect at ED<sub>50</sub>: ' + (best.E0 + best.Emax * 0.5).toFixed(3) + '<br>';
+    } else if (best.model === 'Log-Linear') {
+      statsHtml += 'Intercept: ' + best.b0.toFixed(4) + ' (SE ' + best.se_b0.toFixed(4) + ')<br>';
+      statsHtml += 'Log-slope: ' + best.b1.toFixed(4) + ' (SE ' + best.se_b1.toFixed(4) + ')<br>';
+      statsHtml += 'Effect = b0 + b1 * log(dose + ' + (best.epsilon ?? 1e-6) + ')<br>';
+    } else if (best.model === 'Exponential') {
+      statsHtml += 'E<sub>max</sub>: ' + best.Emax.toFixed(4) + ' (SE ' + best.se_Emax.toFixed(4) + ')<br>';
+      statsHtml += 'Rate (\u03B1): ' + best.alpha.toFixed(4) + ' (SE ' + best.se_alpha.toFixed(4) + ')<br>';
+      statsHtml += 'Effect = Emax * (1 - exp(-\u03B1 * dose))<br>';
+    } else if (best.model === 'Hill') {
+      statsHtml += 'E<sub>max</sub>: ' + best.Emax.toFixed(4) + ' (SE ' + best.se_Emax.toFixed(4) + ')<br>';
+      statsHtml += 'ED<sub>50</sub>: ' + best.ED50.toFixed(2) + ' (SE ' + best.se_ED50.toFixed(4) + ')<br>';
+      statsHtml += 'Hill coefficient (h): ' + best.h.toFixed(3) + ' (SE ' + best.se_h.toFixed(4) + ')<br>';
+      statsHtml += 'Effect = Emax * dose<sup>h</sup> / (ED50<sup>h</sup> + dose<sup>h</sup>)<br>';
     }
     statsHtml += 'R\u00B2 = ' + (best.R2 * 100).toFixed(1) + '% | AIC (relative) = ' + best.aic.toFixed(1) + ' | k = ' + best.nPoints + ' data points';
     var drHet = computeDRHeterogeneity(data.points, best);
