@@ -71,6 +71,61 @@ results$alcohol_cvd$Slist <- lapply(Slist, function(s) as.matrix(s))
 # --- Study-level data ---
 results$alcohol_cvd$data <- alcohol_cvd
 
+# --- RCS-3 REML ---
+library(splines)
+rcs3_reml <- dosresmeta(logrr ~ rcs(dose, knots=c(10, 25, 50)), id=id, type=type, se=se,
+                         cases=cases, n=n, data=alcohol_cvd, method="reml")
+pred_rcs3 <- predict(rcs3_reml, newdata=data.frame(dose=doses), expo=FALSE)
+
+results$alcohol_cvd$rcs3_reml <- list(
+  coefficients = as.numeric(coef(rcs3_reml)),
+  se = as.numeric(sqrt(diag(vcov(rcs3_reml)))),
+  tau2_matrix = as.matrix(rcs3_reml$Psi),
+  logLik = as.numeric(logLik(rcs3_reml)),
+  AIC = AIC(rcs3_reml),
+  BIC = BIC(rcs3_reml),
+  knots = c(10, 25, 50),
+  predictions = data.frame(dose=doses, pred=pred_rcs3$pred,
+                           ci_lb=pred_rcs3$ci.lb, ci_ub=pred_rcs3$ci.ub)
+)
+
+# --- Quadratic ML ---
+quad_ml <- dosresmeta(logrr ~ dose + I(dose^2), id=id, type=type, se=se,
+                       cases=cases, n=n, data=alcohol_cvd, method="ml")
+results$alcohol_cvd$quadratic_ml <- list(
+  coefficients = as.numeric(coef(quad_ml)),
+  se = as.numeric(sqrt(diag(vcov(quad_ml)))),
+  tau2_matrix = as.matrix(quad_ml$Psi),
+  AIC = AIC(quad_ml)
+)
+
+# --- Quadratic Fixed ---
+quad_fixed <- dosresmeta(logrr ~ dose + I(dose^2), id=id, type=type, se=se,
+                          cases=cases, n=n, data=alcohol_cvd, method="fixed")
+results$alcohol_cvd$quadratic_fixed <- list(
+  coefficients = as.numeric(coef(quad_fixed)),
+  se = as.numeric(sqrt(diag(vcov(quad_fixed))))
+)
+
+# --- Leave-one-out (Linear REML): drop each study, refit ---
+loo_results <- list()
+study_ids <- unique(alcohol_cvd$id)
+for (sid in study_ids) {
+  loo_data <- alcohol_cvd[alcohol_cvd$id != sid, ]
+  tryCatch({
+    loo_fit <- dosresmeta(logrr ~ dose, id=id, type=type, se=se,
+                           cases=cases, n=n, data=loo_data, method="reml")
+    loo_results[[as.character(sid)]] <- list(
+      coefficients = as.numeric(coef(loo_fit)),
+      se = as.numeric(sqrt(diag(vcov(loo_fit)))),
+      AIC = AIC(loo_fit)
+    )
+  }, error = function(e) {
+    loo_results[[as.character(sid)]] <<- list(error = e$message)
+  })
+}
+results$alcohol_cvd$leave_one_out <- loo_results
+
 # ============================================
 # Dataset 2: coffee_mort (21+ studies)
 # ============================================
@@ -136,4 +191,5 @@ json_output <- toJSON(results, pretty=TRUE, digits=10, auto_unbox=TRUE)
 writeLines(json_output, "validation_reference.json")
 cat("Validation reference saved to validation_reference.json\n")
 cat("Datasets: alcohol_cvd, coffee_mort, ci_ex, cc_ex\n")
-cat("Models: linear (REML/ML/fixed), quadratic (REML)\n")
+cat("Models: linear (REML/ML/fixed), quadratic (REML/ML/fixed), RCS-3 (REML)\n")
+cat("Also: leave-one-out, GL covariance matrices\n")

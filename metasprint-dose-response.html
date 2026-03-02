@@ -12577,8 +12577,49 @@ body.dark-mode .badge-duplicate { background: #1e293b; color: #94a3b8; }
       }
     }
 
-    // --- 8. Summary stats ---
-    check('Total tests >= 25', passed + failed >= 25);
+    // --- 8. FP1 on alcohol_cvd: power search should find best model ---
+    // Compute SE from GL covariance diagonals
+    var fpPts = [];
+    for (var si = 0; si < alcData.length; si++) {
+      var s = alcData[si];
+      var Smat = greenlandLongnecker(s.cases, s.n, 0, s.type);
+      for (var i = 1; i < s.doses.length; i++) {
+        var sei = Smat && Smat[i-1] ? Math.sqrt(Smat[i-1][i-1]) : 0.2;
+        fpPts.push({dose: s.doses[i], effect: s.logrr[i], se: sei, studyId: String(s.id)});
+      }
+    }
+    var fp1 = fitFP1DR(fpPts);
+    check('FP1 fit not null', fp1 !== null);
+    check('FP1 has power', fp1 && fp1.power !== undefined);
+    check('FP1 R2 >= 0', fp1 && fp1.R2 >= 0);
+    check('FP1 AIC finite', fp1 && isFinite(fp1.aic));
+
+    // --- 9. Model comparison includes FP1 and FP2 ---
+    var comp = compareDoseResponseModels(fpPts);
+    check('Model comparison not null', comp !== null);
+    check('Model comp >= 5 models', comp && comp.all.length >= 5);
+    check('Model comp AIC weights sum ~1', comp && Math.abs(comp.all.reduce(function(s, m) { return s + m.aicWeight; }, 0) - 1) < 0.01);
+    check('Best model has delta AIC = 0', comp && comp.best.deltaAIC === 0);
+
+    // --- 10. Prediction interval uses correct df ---
+    var pi = computePredictionInterval(reml ? reml.coefficients[0] * 10 : -0.04, remlSE, reml ? reml.tau2 : 0.0001, alcData.length, 1, 0.95);
+    check('PI not null', pi !== null);
+    check('PI lower < effect', pi && pi.lower < (reml ? reml.coefficients[0] * 10 : -0.04));
+    check('PI upper > effect', pi && pi.upper > (reml ? reml.coefficients[0] * 10 : -0.04));
+    check('PI wider than CI', pi && (pi.upper - pi.lower) > 2 * 1.96 * remlSE);
+
+    // --- 11. Heterogeneity Q_DR on linear model ---
+    var linModel = fitLinearDR(fpPts);
+    if (linModel) {
+      var het = computeDRHeterogeneity(fpPts, linModel);
+      check('Q_DR not null', het !== null);
+      check('Q_DR >= 0', het && het.Q_DR >= 0);
+      check('Q_DR df = nPts - 2', het && het.df === fpPts.length - 2);
+      check('I2_DR 0-100', het && het.I2_DR >= 0 && het.I2_DR <= 100);
+    }
+
+    // --- 12. Summary stats ---
+    check('Total tests >= 40', passed + failed >= 40);
 
     console.log('_testVsR: ' + passed + ' passed, ' + failed + ' failed');
     return failed === 0;
