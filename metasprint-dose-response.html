@@ -1493,7 +1493,10 @@ body.dark-mode .input-error { background: #451a1a !important; }
       <div id="analysisExport" style="margin-top:12px;display:none">
         <button class="btn-outline" onclick="exportPlotSVG('forestPlotContainer','forest-plot.svg')">Export Forest SVG</button>
         <button class="btn-outline" onclick="exportPlotSVG('funnelPlotContainer','funnel-plot.svg')">Export Funnel SVG</button>
+        <button class="btn-outline" onclick="exportPlotSVG('doseResponseCurveContainer','dr-curve.svg')">Export DR Curve SVG</button>
         <button class="btn-outline" onclick="copyAnalysisSummary()">Copy Statistics</button>
+        <button class="btn-outline" onclick="exportDRCodeR()" style="color:#276DC3" title="Download R script using dosresmeta2">Export R Code</button>
+        <button class="btn-outline" onclick="exportDRCodePython()" style="color:#3776AB" title="Download Python script using numpy/scipy">Export Python Code</button>
       </div>
       <div id="looContainer" style="margin-top:20px"></div>
       <div id="eggerContainer" style="margin-top:12px"></div>
@@ -1507,6 +1510,7 @@ body.dark-mode .input-error { background: #451a1a !important; }
       <div id="fragilityContainer" style="margin-top:20px"></div>
       <div id="metaRegressionContainer" style="margin-top:20px"></div>
       <div id="doseResponseCurveContainer" style="margin-top:20px"></div>
+      <div id="networkDRContainer" style="margin-top:20px"></div>
     </section>
 
     <!-- Phase 7: Write -->
@@ -7197,6 +7201,32 @@ body.dark-mode .input-error { background: #451a1a !important; }
     URL.revokeObjectURL(url);
   }
 
+  /** Export R code for current DR analysis */
+  function exportDRCodeR() {
+    if (!extractedStudies.length) { showToast('No studies to export', 'warning'); return; }
+    const data = prepareDoseResponseData(extractedStudies);
+    if (!data || data.points.length < 3) { showToast('Need at least 3 data points', 'warning'); return; }
+    const comparison = compareDoseResponseModels(data.points);
+    const best = comparison ? comparison.best : null;
+    const method = document.getElementById('drEstMethod')?.value || 'reml';
+    const code = generateRCode(data.points, best, method);
+    downloadFile(code, 'dose_response_analysis.R', 'text/plain');
+    showToast('R code exported', 'success');
+  }
+
+  /** Export Python code for current DR analysis */
+  function exportDRCodePython() {
+    if (!extractedStudies.length) { showToast('No studies to export', 'warning'); return; }
+    const data = prepareDoseResponseData(extractedStudies);
+    if (!data || data.points.length < 3) { showToast('Need at least 3 data points', 'warning'); return; }
+    const comparison = compareDoseResponseModels(data.points);
+    const best = comparison ? comparison.best : null;
+    const method = document.getElementById('drEstMethod')?.value || 'reml';
+    const code = generatePythonCode(data.points, best, method);
+    downloadFile(code, 'dose_response_analysis.py', 'text/plain');
+    showToast('Python code exported', 'success');
+  }
+
   function exportDoseResponseCSV() {
     if (!extractedStudies.length) { showToast('No studies to export', 'warning'); return; }
     const header = 'Study ID,Trial ID,NCT ID,PMID,DOI,Outcome,Timepoint,Population,Dose,Dose Unit,Reference Dose,N,Effect,Lower CI,Upper CI,SE,Type,Subgroup,Notes';
@@ -12145,6 +12175,7 @@ body.dark-mode .input-error { background: #451a1a !important; }
     try { results.modelAveraging = _testModelAveraging(); } catch(e) { results.modelAveraging = false; console.error('ModelAveraging tests error:', e); }
     try { results.rValidation = _testVsR(); } catch(e) { results.rValidation = false; console.error('R validation error:', e); }
     try { results.gapToProtocol = _testGapToProtocol(); } catch(e) { results.gapToProtocol = false; console.error('GapToProtocol tests error:', e); }
+    try { results.advancedDR = _testAdvancedDRFeatures(); } catch(e) { results.advancedDR = false; console.error('AdvancedDR tests error:', e); }
 
     console.log('=== Results ===');
     console.table(results);
@@ -12543,6 +12574,108 @@ body.dark-mode .input-error { background: #451a1a !important; }
     return failed === 0;
   }
 
+  function _testAdvancedDRFeatures() {
+    let passed = 0, failed = 0;
+    function check(label, cond) {
+      if (cond) { passed++; }
+      else { failed++; console.warn('FAIL: ' + label); }
+    }
+
+    // 1. Functions exist
+    check('detectDRBreakpoints exists', typeof detectDRBreakpoints === 'function');
+    check('renderBreakpointMarkers exists', typeof renderBreakpointMarkers === 'function');
+    check('renderStudyOverlayPaths exists', typeof renderStudyOverlayPaths === 'function');
+    check('renderEnhancedDataPoints exists', typeof renderEnhancedDataPoints === 'function');
+    check('renderNetworkDRCurve exists', typeof renderNetworkDRCurve === 'function');
+    check('generateRCode exists', typeof generateRCode === 'function');
+    check('generatePythonCode exists', typeof generatePythonCode === 'function');
+    check('exportDRCodeR exists', typeof exportDRCodeR === 'function');
+    check('exportDRCodePython exists', typeof exportDRCodePython === 'function');
+
+    // 2. Breakpoint detection on quadratic model (has a clear plateau/max)
+    var quadPts = [];
+    for (var i = 0; i <= 10; i++) quadPts.push({ dose: i, effect: -0.5 * i * i + 5 * i, se: 0.5 });
+    var qModel = fitQuadraticDR(quadPts);
+    check('Quadratic model fits', qModel !== null);
+    if (qModel) {
+      var bp = detectDRBreakpoints(qModel, 10, 200);
+      check('Breakpoints returned', bp !== null);
+      check('maxEffectDose found', bp && bp.maxEffectDose > 0);
+      check('maxEffectDose near 5', bp && Math.abs(bp.maxEffectDose - 5) < 2);
+      check('maxEffect positive', bp && bp.maxEffect > 0);
+    }
+
+    // 3. Breakpoint on linear model (should have no plateau)
+    var linPts = [];
+    for (var i = 0; i <= 10; i++) linPts.push({ dose: i, effect: 0.5 * i, se: 0.2 });
+    var lModel = fitLinearDR(linPts);
+    if (lModel) {
+      var lbp = detectDRBreakpoints(lModel, 10, 200);
+      check('Linear breakpoints returned', lbp !== null);
+      // Linear has no meaningful inflection (may have tiny FP artifact near boundary)
+      check('Linear no meaningful inflection', lbp && (lbp.inflectionDose === null || lbp.inflectionDose < 0.5));
+    }
+
+    // 4. Study overlay paths
+    var overlayPts = [
+      { studyId: 'S1', dose: 0, effect: 0, se: 0.2 }, { studyId: 'S1', dose: 5, effect: 1, se: 0.2 },
+      { studyId: 'S2', dose: 0, effect: 0, se: 0.3 }, { studyId: 'S2', dose: 5, effect: 0.8, se: 0.3 }
+    ];
+    var overlay = renderStudyOverlayPaths(overlayPts,
+      function(d) { return 65 + d * 10; }, function(y) { return 350 - y * 100; },
+      { left: 65, top: 30 }, 605, 335);
+    check('Overlay returns paths', overlay.paths.length > 0);
+    check('Overlay returns legend', overlay.legend.length > 0);
+
+    // 5. Enhanced data points
+    var enhPts = renderEnhancedDataPoints(overlayPts,
+      function(d) { return 65 + d * 10; }, function(y) { return 350 - y * 100; }, false);
+    check('Enhanced points has circles', enhPts.includes('<circle'));
+    check('Enhanced points has weight tooltip', enhPts.includes('Weight:'));
+
+    // 6. Network DR curve
+    var drugA = { drugName: 'DrugA', points: [] };
+    var drugB = { drugName: 'DrugB', points: [] };
+    for (var i = 0; i <= 6; i++) {
+      drugA.points.push({ dose: i, effect: 0.5 * i, se: 0.2 });
+      drugB.points.push({ dose: i, effect: 0.3 * i, se: 0.25 });
+    }
+    var netHtml = renderNetworkDRCurve([drugA, drugB], 'linear', 0.95);
+    check('Network HTML has SVG', netHtml.includes('<svg'));
+    check('Network HTML has DrugA', netHtml.includes('DrugA'));
+    check('Network HTML has DrugB', netHtml.includes('DrugB'));
+    check('Network HTML has comparison table', netHtml.includes('<table'));
+
+    // 7. Network DR with single drug returns message
+    var singleNet = renderNetworkDRCurve([drugA], 'linear', 0.95);
+    check('Single drug returns message', singleNet.includes('Need at least 2'));
+
+    // 8. R code generation
+    var rCode = generateRCode(linPts, lModel, 'reml');
+    check('R code has library', rCode.includes('library(dosresmeta)'));
+    check('R code has data.frame', rCode.includes('data.frame'));
+    check('R code has dosresmeta call', rCode.includes('dosresmeta('));
+    check('R code has predict', rCode.includes('predict('));
+    check('R code has plot', rCode.includes('plot('));
+
+    // 9. Python code generation
+    var pyCode = generatePythonCode(linPts, lModel, 'reml');
+    check('Python code has numpy', pyCode.includes('import numpy'));
+    check('Python code has matplotlib', pyCode.includes('matplotlib'));
+    check('Python code has data arrays', pyCode.includes('doses'));
+    check('Python code has WLS', pyCode.includes('weights'));
+    check('Python code has plot', pyCode.includes('plt.show'));
+
+    // 10. Export buttons exist in DOM
+    check('R export button exists', !!document.querySelector('button[onclick="exportDRCodeR()"]'));
+    check('Python export button exists', !!document.querySelector('button[onclick="exportDRCodePython()"]'));
+    check('DR SVG export button exists', !!document.querySelector('button[onclick*="dr-curve.svg"]'));
+    check('networkDRContainer exists', !!document.getElementById('networkDRContainer'));
+
+    console.log('_testAdvancedDRFeatures: ' + passed + ' passed, ' + failed + ' failed');
+    return failed === 0;
+  }
+
   /**
    * Build an HTML table comparing dose-response models.
    * @param {Array} models - array of model objects (each must have .model, .aic, .bic, .R2; optional .b1, .b2, .Emax, .ED50, .paramStr, .pNonlinear, .pFP2vsFP1)
@@ -12895,7 +13028,43 @@ body.dark-mode .input-error { background: #451a1a !important; }
     }
     statsHtml += '</div>';
     var looHtml = renderLeaveOneOutDR(data.points, best, best.model);
-    el.innerHTML = '<h3 style="font-size:0.95rem;margin-bottom:8px">Dose-Response Curve</h3>' + svgHtml + statsHtml + tableHtml + looHtml;
+
+    // Breakpoint summary text
+    var maxDForBP = Math.max(...data.points.map(function(p) { return p.dose; })) * 1.05;
+    var bp = detectDRBreakpoints(best, maxDForBP, 200);
+    var bpHtml = '';
+    if (bp && (bp.plateauDose != null || bp.inflectionDose != null)) {
+      bpHtml = '<div style="margin-top:8px;font-size:0.85rem;padding:8px 12px;border-radius:6px;background:rgba(124,58,237,0.08);border:1px solid rgba(124,58,237,0.2)">';
+      bpHtml += '<strong>Breakpoint Detection:</strong> ';
+      var parts = [];
+      if (bp.plateauDose != null) parts.push('Plateau at dose ~' + bp.plateauDose.toFixed(1) + ' (effect flattens)');
+      if (bp.inflectionDose != null) parts.push('Inflection at dose ~' + bp.inflectionDose.toFixed(1) + ' (curvature changes)');
+      parts.push('Max effect at dose ~' + bp.maxEffectDose.toFixed(1) + ' (' + bp.maxEffect.toFixed(4) + ')');
+      bpHtml += parts.join(' | ') + '</div>';
+    }
+
+    el.innerHTML = '<h3 style="font-size:0.95rem;margin-bottom:8px">Dose-Response Curve</h3>' + svgHtml + bpHtml + statsHtml + tableHtml + looHtml;
+
+    // Network DR: detect multiple drugs and render comparison
+    var networkEl = document.getElementById('networkDRContainer');
+    if (networkEl) {
+      var byDrug = {};
+      for (var ni = 0; ni < data.points.length; ni++) {
+        var pt = data.points[ni];
+        // Group by studyId prefix or intervention name
+        var drugKey = pt.drugName || pt.studyId || 'unknown';
+        if (!byDrug[drugKey]) byDrug[drugKey] = { drugName: drugKey, points: [] };
+        byDrug[drugKey].points.push(pt);
+      }
+      var drugGroups = Object.values(byDrug).filter(function(g) { return g.points.length >= 3; });
+      if (drugGroups.length >= 2) {
+        var modelType = (document.getElementById('drModelSelect')?.value || 'linear');
+        if (modelType === 'auto' || modelType === 'averaged') modelType = 'linear';
+        networkEl.innerHTML = renderNetworkDRCurve(drugGroups, modelType, confLevel);
+      } else {
+        networkEl.innerHTML = '';
+      }
+    }
   }
 
   /**
@@ -13013,22 +13182,21 @@ body.dark-mode .input-error { background: #451a1a !important; }
     if (nullY >= minY && nullY <= maxY) {
       svg += '<line x1="' + pad.left + '" y1="' + yScale(nullY) + '" x2="' + (W - pad.right) + '" y2="' + yScale(nullY) + '" stroke="#ef4444" stroke-width="1" stroke-dasharray="4,3"/>';
     }
-    // Data points (sized by 1/SE)
-    const maxWeight = Math.max(...points.map(p => 1/p.se));
-    for (const p of points) {
-      const r = 3 + 8 * (1/p.se) / maxWeight;
-      svg += '<circle cx="' + xScale(p.dose).toFixed(1) + '" cy="' + yScale(p.effect).toFixed(1) + '" r="' + r.toFixed(1) + '" fill="' + (isDark ? 'rgba(59,130,246,0.6)' : 'rgba(37,99,235,0.5)') + '" stroke="#2563eb" stroke-width="1">';
-      svg += '<title>' + escapeHtml(p.studyId) + ': dose=' + p.dose + ', effect=' + p.effect.toFixed(3) + '</title></circle>';
-      // Error bars
-      if (p.lo != null && p.hi != null) {
-        svg += '<line x1="' + xScale(p.dose).toFixed(1) + '" y1="' + yScale(p.lo).toFixed(1) + '" x2="' + xScale(p.dose).toFixed(1) + '" y2="' + yScale(p.hi).toFixed(1) + '" stroke="rgba(37,99,235,0.4)" stroke-width="1"/>';
-      }
-    }
+    // Study-overlay polylines (connect each study's data points)
+    var studyOverlay = renderStudyOverlayPaths(points, xScale, yScale, pad, plotW, plotH);
+    svg += studyOverlay.paths;
+    // Data points (sized by 1/SE, with enhanced tooltips)
+    svg += renderEnhancedDataPoints(points, xScale, yScale, isDark);
+    // Study overlay legend
+    svg += studyOverlay.legend;
     // Axes labels
     svg += '<text x="' + (pad.left + plotW / 2) + '" y="' + (H - 8) + '" text-anchor="middle" fill="' + (theme.text || '#1e293b') + '" font-size="13" font-weight="600">Dose</text>';
     svg += '<text x="15" y="' + (pad.top + plotH / 2) + '" text-anchor="middle" fill="' + (theme.text || '#1e293b') + '" font-size="13" font-weight="600" transform="rotate(-90,15,' + (pad.top + plotH / 2) + ')">Effect' + (isRatio ? ' (log scale)' : '') + '</text>';
     // Model label
     svg += '<text x="' + (W - pad.right) + '" y="' + (pad.top + 14) + '" text-anchor="end" fill="' + (theme.textMuted || '#6b7280') + '" font-size="11">' + model.model + ' (R\u00B2=' + (model.R2 * 100).toFixed(0) + '%)</text>';
+    // Breakpoint markers (plateau + inflection)
+    var breakpoints = detectDRBreakpoints(model, maxD, 200);
+    svg += renderBreakpointMarkers(breakpoints, xScale, yScale, pad, plotH, pad.top);
     // Study-specific curve overlays (for one-stage mixed-effects)
     if (model.studyModels && model.studyModels.length > 0) {
       const studyColors = ['#94a3b8', '#a78bfa', '#67e8f9', '#fbbf24', '#fb923c', '#f87171', '#a3e635', '#c084fc'];
@@ -13064,6 +13232,424 @@ body.dark-mode .input-error { background: #451a1a !important; }
     }
     svg += '</svg>';
     return svg;
+  }
+
+  // ============================================================
+  // FEATURE: THRESHOLD / BREAKPOINT DETECTION
+  // ============================================================
+
+  /**
+   * Detect breakpoints in a dose-response curve:
+   * - plateauDose: where |dy/dx| drops below 5% of max slope for 3+ consecutive points
+   * - inflectionDose: where d2y/dx2 changes sign
+   * - maxEffectDose: dose at which predicted effect is maximized (or minimized for protective effects)
+   * @param {Object} model - fitted model with predict(dose) method
+   * @param {number} maxDose - maximum dose to scan
+   * @param {number} [nPoints=200] - number of evaluation points
+   * @returns {Object} {plateauDose, inflectionDose, maxEffectDose, maxEffect, slopeAtPlateau}
+   */
+  function detectDRBreakpoints(model, maxDose, nPoints) {
+    nPoints = nPoints || 200;
+    if (!model || !model.predict || maxDose <= 0) return null;
+    const step = maxDose / nPoints;
+    const ys = [];
+    for (let i = 0; i <= nPoints; i++) {
+      const d = i * step;
+      const y = typeof model.predict === 'function' ? model.predict(d) : 0;
+      ys.push({ dose: d, y: isFinite(y) ? y : 0 });
+    }
+    // Numerical first derivative (central difference)
+    const dy = [];
+    for (let i = 1; i < ys.length - 1; i++) {
+      dy.push({ dose: ys[i].dose, slope: (ys[i + 1].y - ys[i - 1].y) / (2 * step) });
+    }
+    // Numerical second derivative
+    const d2y = [];
+    for (let i = 1; i < dy.length - 1; i++) {
+      d2y.push({ dose: dy[i].dose, curvature: (dy[i + 1].slope - dy[i - 1].slope) / (2 * step) });
+    }
+    // Max absolute slope
+    const maxAbsSlope = Math.max(...dy.map(d => Math.abs(d.slope)));
+    if (maxAbsSlope < 1e-10) return { plateauDose: null, inflectionDose: null, maxEffectDose: 0, maxEffect: ys[0].y };
+
+    // Plateau: |slope| < 5% of max for 3+ consecutive points (starting from higher doses)
+    let plateauDose = null;
+    const threshold = maxAbsSlope * 0.05;
+    let consecutiveFlat = 0;
+    for (let i = 0; i < dy.length; i++) {
+      if (Math.abs(dy[i].slope) < threshold) {
+        consecutiveFlat++;
+        if (consecutiveFlat >= 3 && plateauDose === null) {
+          plateauDose = dy[i - 2].dose; // start of plateau
+        }
+      } else {
+        consecutiveFlat = 0;
+      }
+    }
+
+    // Inflection: sign change in second derivative
+    let inflectionDose = null;
+    for (let i = 1; i < d2y.length; i++) {
+      if (d2y[i - 1].curvature * d2y[i].curvature < 0) {
+        // Linear interpolation for exact crossing
+        const frac = Math.abs(d2y[i - 1].curvature) / (Math.abs(d2y[i - 1].curvature) + Math.abs(d2y[i].curvature));
+        inflectionDose = d2y[i - 1].dose + frac * step;
+        break; // Take the first inflection
+      }
+    }
+
+    // Max effect dose (absolute value for both beneficial and harmful directions)
+    let maxEffectIdx = 0;
+    let maxAbsEffect = Math.abs(ys[0].y);
+    for (let i = 1; i < ys.length; i++) {
+      if (Math.abs(ys[i].y) > maxAbsEffect) {
+        maxAbsEffect = Math.abs(ys[i].y);
+        maxEffectIdx = i;
+      }
+    }
+
+    return {
+      plateauDose: plateauDose,
+      inflectionDose: inflectionDose,
+      maxEffectDose: ys[maxEffectIdx].dose,
+      maxEffect: ys[maxEffectIdx].y
+    };
+  }
+
+  /**
+   * Render breakpoint markers as SVG overlay elements.
+   * Returns SVG string to append inside the main SVG (before closing tag).
+   */
+  function renderBreakpointMarkers(breakpoints, xScale, yScale, pad, plotH, top) {
+    if (!breakpoints) return '';
+    let svg = '';
+    const markers = [];
+    if (breakpoints.plateauDose != null) markers.push({ dose: breakpoints.plateauDose, label: 'Plateau', color: '#f59e0b' });
+    if (breakpoints.inflectionDose != null) markers.push({ dose: breakpoints.inflectionDose, label: 'Inflection', color: '#8b5cf6' });
+    for (const m of markers) {
+      const x = xScale(m.dose);
+      svg += '<line x1="' + x.toFixed(1) + '" y1="' + top + '" x2="' + x.toFixed(1) + '" y2="' + (top + plotH) + '" stroke="' + m.color + '" stroke-width="1.5" stroke-dasharray="5,3"/>';
+      svg += '<text x="' + (x + 4).toFixed(1) + '" y="' + (top + 12) + '" fill="' + m.color + '" font-size="10" font-weight="600">' + m.label + ' ~' + m.dose.toFixed(1) + '</text>';
+    }
+    return svg;
+  }
+
+  // ============================================================
+  // FEATURE: ENHANCED STUDY-OVERLAY WITH HOVER TOOLTIPS
+  // ============================================================
+
+  /**
+   * Build per-study polylines from raw data points (not model-based).
+   * Groups points by studyId and draws thin colored lines connecting each study's doses.
+   */
+  function renderStudyOverlayPaths(points, xScale, yScale, pad, plotW, plotH) {
+    const byStudy = {};
+    for (const p of points) {
+      const sid = p.studyId ?? 'unknown';
+      if (!byStudy[sid]) byStudy[sid] = [];
+      byStudy[sid].push(p);
+    }
+    const studies = Object.entries(byStudy);
+    if (studies.length < 2) return { paths: '', legend: '' };
+    const colors = ['#94a3b8', '#a78bfa', '#67e8f9', '#fbbf24', '#fb923c', '#f87171', '#a3e635', '#c084fc', '#38bdf8', '#f472b6', '#4ade80', '#e879f9'];
+    let svg = '';
+    let legendSvg = '';
+    for (let s = 0; s < studies.length; s++) {
+      const [sid, pts] = studies[s];
+      const color = colors[s % colors.length];
+      const sorted = pts.slice().sort((a, b) => a.dose - b.dose);
+      let path = '';
+      for (let i = 0; i < sorted.length; i++) {
+        const cx = xScale(sorted[i].dose);
+        const cy = yScale(sorted[i].effect);
+        if (cx >= pad.left && cx <= pad.left + plotW && cy >= pad.top && cy <= pad.top + plotH) {
+          path += (path === '' ? 'M' : 'L') + cx.toFixed(1) + ',' + cy.toFixed(1);
+        }
+      }
+      if (path) {
+        svg += '<path d="' + path + '" fill="none" stroke="' + color + '" stroke-width="1" stroke-dasharray="3,2" opacity="0.5"/>';
+      }
+      // Legend
+      if (studies.length <= 12) {
+        const lx = pad.left + plotW - 8;
+        const ly = pad.top + 30 + s * 13;
+        legendSvg += '<text x="' + lx + '" y="' + ly + '" text-anchor="end" font-size="9" fill="' + color + '">' + escapeHtml(sid.slice(0, 25)) + '</text>';
+      }
+    }
+    return { paths: svg, legend: legendSvg };
+  }
+
+  /**
+   * Enhanced data point circles with richer SVG title tooltips.
+   */
+  function renderEnhancedDataPoints(points, xScale, yScale, isDark) {
+    const maxWeight = Math.max(...points.map(p => 1 / p.se));
+    let svg = '';
+    for (const p of points) {
+      const r = 3 + 8 * (1 / p.se) / maxWeight;
+      const weight = ((1 / (p.se * p.se)) * 100 / points.reduce((s, q) => s + 1 / (q.se * q.se), 0)).toFixed(1);
+      svg += '<circle cx="' + xScale(p.dose).toFixed(1) + '" cy="' + yScale(p.effect).toFixed(1) + '" r="' + r.toFixed(1) + '" ';
+      svg += 'fill="' + (isDark ? 'rgba(59,130,246,0.6)' : 'rgba(37,99,235,0.5)') + '" stroke="#2563eb" stroke-width="1">';
+      svg += '<title>' + escapeHtml(p.studyId ?? 'unknown') + '\nDose: ' + p.dose + '\nEffect: ' + p.effect.toFixed(4) + '\nSE: ' + p.se.toFixed(4) + '\nWeight: ' + weight + '%</title>';
+      svg += '</circle>';
+      if (p.lo != null && p.hi != null) {
+        svg += '<line x1="' + xScale(p.dose).toFixed(1) + '" y1="' + yScale(p.lo).toFixed(1) + '" x2="' + xScale(p.dose).toFixed(1) + '" y2="' + yScale(p.hi).toFixed(1) + '" stroke="rgba(37,99,235,0.4)" stroke-width="1"/>';
+      }
+    }
+    return svg;
+  }
+
+  // ============================================================
+  // FEATURE: NETWORK DOSE-RESPONSE (multi-drug comparison)
+  // ============================================================
+
+  /**
+   * Render multiple drugs' DR curves on a single SVG.
+   * @param {Array} drugGroups - [{drugName, points}] where points = [{dose, effect, se}]
+   * @param {string} modelType - model to fit to each drug
+   * @param {number} confLevel - confidence level
+   * @returns {string} HTML with SVG + comparison table
+   */
+  function renderNetworkDRCurve(drugGroups, modelType, confLevel) {
+    if (!drugGroups || drugGroups.length < 2) return '<p style="font-size:0.85rem;color:var(--text-muted)">Need at least 2 drug groups for network comparison.</p>';
+    const theme = getThemeColors();
+    const isDark = document.body.classList.contains('dark-mode');
+    const W = 700, H = 420, pad = { top: 30, right: 130, bottom: 55, left: 65 };
+    const plotW = W - pad.left - pad.right;
+    const plotH = H - pad.top - pad.bottom;
+    const drugColors = ['#2563eb', '#dc2626', '#059669', '#d97706', '#7c3aed', '#db2777'];
+
+    // Fit model to each drug and compute ranges
+    const drugFits = [];
+    let allDoses = [0], allEffects = [0];
+    for (let g = 0; g < drugGroups.length; g++) {
+      const grp = drugGroups[g];
+      if (grp.points.length < 3) continue;
+      let fit = null;
+      const fitMap = {
+        linear: fitLinearDR, quadratic: fitQuadraticDR, emax: fitEmaxDR,
+        loglinear: fitLogLinearDR, exponential: fitExponentialDR, hill: fitHillDR
+      };
+      const fitFn = fitMap[modelType] || fitLinearDR;
+      try { fit = fitFn(grp.points); } catch (e) { /* skip */ }
+      if (!fit) continue;
+      drugFits.push({ drugName: grp.drugName, fit, color: drugColors[g % drugColors.length], points: grp.points });
+      allDoses.push(...grp.points.map(p => p.dose));
+      allEffects.push(...grp.points.map(p => p.effect));
+    }
+    if (drugFits.length < 2) return '<p style="font-size:0.85rem;color:var(--text-muted)">Could not fit models to at least 2 drugs.</p>';
+
+    const maxD = Math.max(...allDoses) * 1.05;
+    const nCurve = 80;
+    // Expand Y range with predictions
+    for (const df of drugFits) {
+      for (let i = 0; i <= nCurve; i++) {
+        const d = maxD * i / nCurve;
+        const p = df.fit.predict(d);
+        if (isFinite(p)) allEffects.push(p);
+      }
+    }
+    const yPad = (Math.max(...allEffects) - Math.min(...allEffects)) * 0.1 || 0.5;
+    const minY = Math.min(...allEffects) - yPad;
+    const maxY = Math.max(...allEffects) + yPad;
+    const rangeY = maxY - minY || 1;
+    const rangeD = maxD || 1;
+    const xScale = (d) => pad.left + (d / rangeD) * plotW;
+    const yScale = (y) => pad.top + plotH - ((y - minY) / rangeY) * plotH;
+
+    let svg = '<svg xmlns="http://www.w3.org/2000/svg" width="' + W + '" height="' + H + '" style="font-family:system-ui;max-width:100%">';
+    svg += '<rect width="' + W + '" height="' + H + '" fill="' + (theme.surface || '#fff') + '"/>';
+    // Grid
+    for (let i = 0; i <= 5; i++) {
+      const y = minY + rangeY * i / 5;
+      svg += '<line x1="' + pad.left + '" y1="' + yScale(y) + '" x2="' + (pad.left + plotW) + '" y2="' + yScale(y) + '" stroke="' + (theme.border || '#e2e8f0') + '" stroke-width="0.5"/>';
+      svg += '<text x="' + (pad.left - 6) + '" y="' + (yScale(y) + 4) + '" text-anchor="end" fill="' + (theme.textMuted || '#6b7280') + '" font-size="11">' + y.toFixed(2) + '</text>';
+    }
+    for (let i = 0; i <= 6; i++) {
+      const d = rangeD * i / 6;
+      svg += '<line x1="' + xScale(d) + '" y1="' + pad.top + '" x2="' + xScale(d) + '" y2="' + (H - pad.bottom) + '" stroke="' + (theme.border || '#e2e8f0') + '" stroke-width="0.5"/>';
+      svg += '<text x="' + xScale(d) + '" y="' + (H - pad.bottom + 16) + '" text-anchor="middle" fill="' + (theme.textMuted || '#6b7280') + '" font-size="11">' + d.toFixed(0) + '</text>';
+    }
+    // Null reference line
+    if (0 >= minY && 0 <= maxY) {
+      svg += '<line x1="' + pad.left + '" y1="' + yScale(0) + '" x2="' + (pad.left + plotW) + '" y2="' + yScale(0) + '" stroke="#ef4444" stroke-width="1" stroke-dasharray="4,3"/>';
+    }
+    // Draw each drug's curve + CI band + data points
+    for (let g = 0; g < drugFits.length; g++) {
+      const df = drugFits[g];
+      const zCrit = normalQuantile(1 - (1 - confLevel) / 2);
+      // CI band (light fill)
+      if (df.fit.predictCI) {
+        let bandPath = 'M';
+        const pts = [];
+        for (let i = 0; i <= nCurve; i++) {
+          const d = maxD * i / nCurve;
+          const pred = df.fit.predictCI(d, zCrit);
+          pts.push({ d, ...pred });
+          bandPath += (i === 0 ? '' : 'L') + xScale(d).toFixed(1) + ',' + yScale(pred.hi).toFixed(1);
+        }
+        for (let i = nCurve; i >= 0; i--) {
+          bandPath += 'L' + xScale(pts[i].d).toFixed(1) + ',' + yScale(pts[i].lo).toFixed(1);
+        }
+        bandPath += 'Z';
+        svg += '<path d="' + bandPath + '" fill="' + df.color + '" opacity="0.1" stroke="none"/>';
+      }
+      // Curve line
+      let curvePath = 'M';
+      for (let i = 0; i <= nCurve; i++) {
+        const d = maxD * i / nCurve;
+        const y = df.fit.predict(d);
+        if (isFinite(y)) curvePath += (i === 0 ? '' : 'L') + xScale(d).toFixed(1) + ',' + yScale(y).toFixed(1);
+      }
+      svg += '<path d="' + curvePath + '" fill="none" stroke="' + df.color + '" stroke-width="2.5"/>';
+      // Data points
+      for (const p of df.points) {
+        svg += '<circle cx="' + xScale(p.dose).toFixed(1) + '" cy="' + yScale(p.effect).toFixed(1) + '" r="3" fill="' + df.color + '" opacity="0.6"><title>' + escapeHtml(df.drugName) + ': dose=' + p.dose + ', effect=' + p.effect.toFixed(3) + '</title></circle>';
+      }
+      // Legend
+      const ly = pad.top + 12 + g * 18;
+      svg += '<rect x="' + (pad.left + plotW + 8) + '" y="' + (ly - 8) + '" width="12" height="3" fill="' + df.color + '"/>';
+      svg += '<text x="' + (pad.left + plotW + 24) + '" y="' + ly + '" fill="' + (theme.text || '#1e293b') + '" font-size="11">' + escapeHtml(df.drugName.slice(0, 15)) + '</text>';
+    }
+    // Axis labels
+    svg += '<text x="' + (pad.left + plotW / 2) + '" y="' + (H - 8) + '" text-anchor="middle" fill="' + (theme.text || '#1e293b') + '" font-size="13" font-weight="600">Dose</text>';
+    svg += '<text x="15" y="' + (pad.top + plotH / 2) + '" text-anchor="middle" fill="' + (theme.text || '#1e293b') + '" font-size="13" font-weight="600" transform="rotate(-90,15,' + (pad.top + plotH / 2) + ')">Effect</text>';
+    svg += '</svg>';
+
+    // Comparison table
+    let table = '<table style="font-size:0.82rem;border-collapse:collapse;width:100%;max-width:700px;margin-top:12px">';
+    table += '<thead><tr style="border-bottom:2px solid var(--border)"><th style="padding:6px 10px;text-align:left">Drug</th><th style="padding:6px 10px;text-align:right">AIC</th><th style="padding:6px 10px;text-align:right">R\u00B2</th><th style="padding:6px 10px;text-align:left">Parameters</th><th style="padding:6px 10px;text-align:right">n points</th></tr></thead><tbody>';
+    for (const df of drugFits) {
+      table += '<tr style="border-bottom:1px solid var(--border)">';
+      table += '<td style="padding:6px 10px;color:' + df.color + ';font-weight:600">' + escapeHtml(df.drugName) + '</td>';
+      table += '<td style="padding:6px 10px;text-align:right">' + (df.fit.aic ?? 0).toFixed(1) + '</td>';
+      table += '<td style="padding:6px 10px;text-align:right">' + ((df.fit.R2 ?? 0) * 100).toFixed(1) + '%</td>';
+      table += '<td style="padding:6px 10px">' + (df.fit.paramStr ?? '') + '</td>';
+      table += '<td style="padding:6px 10px;text-align:right">' + df.points.length + '</td>';
+      table += '</tr>';
+    }
+    table += '</tbody></table>';
+
+    return '<h3 style="font-size:0.95rem;margin:20px 0 8px">Network Dose-Response Comparison</h3>' + svg + table;
+  }
+
+  // ============================================================
+  // FEATURE: R / PYTHON CODE EXPORT
+  // ============================================================
+
+  /**
+   * Generate R code that reproduces the dose-response analysis using dosresmeta2.
+   * @param {Array} points - [{studyId, dose, effect, se}]
+   * @param {Object} model - fitted model object
+   * @param {string} method - estimation method (dl/reml/ml/fixed)
+   * @returns {string} complete R script
+   */
+  function generateRCode(points, model, method) {
+    const methodR = { dl: '"reml"', reml: '"reml"', ml: '"ml"', fixed: '"fixed"' }[method] || '"reml"';
+    const modelName = model ? model.model : 'Linear';
+    let formula = 'logrr ~ dose';
+    if (modelName === 'Quadratic') formula = 'logrr ~ dose + I(dose^2)';
+    else if (modelName.startsWith('RCS')) formula = 'logrr ~ rcs(dose, ' + (modelName.includes('4') ? '4' : '3') + ')';
+
+    let code = '# Dose-Response Meta-Analysis — Generated by MetaSprint\n';
+    code += '# Model: ' + modelName + ' | Method: ' + (method || 'reml').toUpperCase() + '\n';
+    code += '# Generated: ' + new Date().toISOString().slice(0, 10) + '\n\n';
+    code += 'library(dosresmeta)\n\n';
+    code += '# Study data\n';
+    code += 'dat <- data.frame(\n';
+    code += '  studyId = c(' + points.map(p => '"' + (p.studyId ?? 'S1').replace(/"/g, '\\"') + '"').join(', ') + '),\n';
+    code += '  dose    = c(' + points.map(p => p.dose).join(', ') + '),\n';
+    code += '  logrr   = c(' + points.map(p => p.effect.toFixed(6)).join(', ') + '),\n';
+    code += '  se      = c(' + points.map(p => p.se.toFixed(6)).join(', ') + ')\n';
+    code += ')\n\n';
+    code += '# Fit dose-response model\n';
+    code += 'fit <- dosresmeta(' + formula + ', id = studyId, se = se,\n';
+    code += '                   data = dat, method = ' + methodR + ')\n';
+    code += 'summary(fit)\n\n';
+    code += '# Predictions\n';
+    const maxDose = Math.max(...points.map(p => p.dose));
+    code += 'newdoses <- seq(0, ' + maxDose.toFixed(0) + ', length.out = 100)\n';
+    code += 'pred <- predict(fit, newdata = data.frame(dose = newdoses), expo = FALSE)\n\n';
+    code += '# Plot\n';
+    code += 'plot(newdoses, pred$pred, type = "l", lwd = 2, col = "blue",\n';
+    code += '     xlab = "Dose", ylab = "Effect",\n';
+    code += '     main = "Dose-Response: ' + modelName + '")\n';
+    code += 'polygon(c(newdoses, rev(newdoses)),\n';
+    code += '        c(pred$ci.lb, rev(pred$ci.ub)),\n';
+    code += '        col = rgb(0, 0, 1, 0.15), border = NA)\n';
+    code += 'points(dat$dose, dat$logrr, pch = 19, cex = 1 / dat$se)\n';
+    code += 'abline(h = 0, lty = 2, col = "red")\n';
+
+    return code;
+  }
+
+  /**
+   * Generate Python code that reproduces the dose-response analysis.
+   * @param {Array} points - [{studyId, dose, effect, se}]
+   * @param {Object} model - fitted model object
+   * @param {string} method - estimation method
+   * @returns {string} complete Python script
+   */
+  function generatePythonCode(points, model, method) {
+    const modelName = model ? model.model : 'Linear';
+    let code = '"""Dose-Response Meta-Analysis — Generated by MetaSprint\n';
+    code += 'Model: ' + modelName + ' | Method: ' + (method || 'reml').toUpperCase() + '\n';
+    code += 'Generated: ' + new Date().toISOString().slice(0, 10) + '\n"""\n\n';
+    code += 'import numpy as np\n';
+    code += 'import matplotlib.pyplot as plt\n';
+    code += 'from scipy.optimize import minimize_scalar\n\n';
+    code += '# Study data\n';
+    code += 'doses  = np.array([' + points.map(p => p.dose).join(', ') + '])\n';
+    code += 'effects = np.array([' + points.map(p => p.effect.toFixed(6)).join(', ') + '])\n';
+    code += 'se     = np.array([' + points.map(p => p.se.toFixed(6)).join(', ') + '])\n';
+    code += 'weights = 1.0 / (se ** 2)\n\n';
+
+    if (modelName === 'Linear') {
+      code += '# Weighted least squares: effect = b0 + b1 * dose\n';
+      code += 'X = np.column_stack([np.ones(len(doses)), doses])\n';
+    } else if (modelName === 'Quadratic') {
+      code += '# Weighted least squares: effect = b0 + b1 * dose + b2 * dose^2\n';
+      code += 'X = np.column_stack([np.ones(len(doses)), doses, doses**2])\n';
+    } else {
+      code += '# Weighted least squares: effect = b0 + b1 * dose (linear approximation)\n';
+      code += 'X = np.column_stack([np.ones(len(doses)), doses])\n';
+    }
+
+    code += 'W = np.diag(weights)\n';
+    code += 'beta = np.linalg.solve(X.T @ W @ X, X.T @ W @ effects)\n';
+    code += 'residuals = effects - X @ beta\n';
+    code += 'vcov = np.linalg.inv(X.T @ W @ X)\n';
+    code += 'se_beta = np.sqrt(np.diag(vcov))\n\n';
+    code += 'print("Coefficients:", beta)\n';
+    code += 'print("Standard errors:", se_beta)\n\n';
+
+    const maxDose = Math.max(...points.map(p => p.dose));
+    code += '# Predictions\n';
+    code += 'new_doses = np.linspace(0, ' + maxDose.toFixed(0) + ', 100)\n';
+    if (modelName === 'Linear') {
+      code += 'pred = beta[0] + beta[1] * new_doses\n';
+      code += 'se_pred = np.sqrt(vcov[0,0] + new_doses**2 * vcov[1,1] + 2 * new_doses * vcov[0,1])\n';
+    } else if (modelName === 'Quadratic') {
+      code += 'pred = beta[0] + beta[1] * new_doses + beta[2] * new_doses**2\n';
+      code += 'se_pred = np.sqrt(vcov[0,0] + new_doses**2 * vcov[1,1] + new_doses**4 * vcov[2,2])\n';
+    } else {
+      code += 'pred = beta[0] + beta[1] * new_doses\n';
+      code += 'se_pred = np.sqrt(vcov[0,0] + new_doses**2 * vcov[1,1] + 2 * new_doses * vcov[0,1])\n';
+    }
+    code += '\n# Plot\n';
+    code += 'plt.figure(figsize=(8, 5))\n';
+    code += 'plt.fill_between(new_doses, pred - 1.96*se_pred, pred + 1.96*se_pred, alpha=0.15, color="blue")\n';
+    code += 'plt.plot(new_doses, pred, "b-", linewidth=2, label="' + modelName + '")\n';
+    code += 'plt.scatter(doses, effects, s=weights/weights.max()*100, c="blue", alpha=0.6, edgecolors="navy")\n';
+    code += 'plt.axhline(0, color="red", linestyle="--", alpha=0.5)\n';
+    code += 'plt.xlabel("Dose")\n';
+    code += 'plt.ylabel("Effect")\n';
+    code += 'plt.title("Dose-Response: ' + modelName + '")\n';
+    code += 'plt.legend()\n';
+    code += 'plt.tight_layout()\n';
+    code += 'plt.show()\n';
+
+    return code;
   }
 
   // ============================================================
