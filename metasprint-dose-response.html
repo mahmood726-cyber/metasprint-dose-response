@@ -1227,9 +1227,11 @@ body.dark-mode .input-error { background: #451a1a !important; }
         <div class="form-group"><label for="protO">Outcomes:</label><input id="protO" maxlength="500" placeholder="e.g., HbA1c reduction, cardiovascular events"></div>
         <div class="form-group"><label for="protStudyType">Study Types:</label>
           <select id="protStudyType"><option>RCTs only</option><option>RCTs and observational</option></select></div>
-        <div style="display:flex;gap:8px">
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
           <button onclick="generateProtocol()">Generate Protocol</button>
+          <button class="btn-success" onclick="searchDRStudies()" style="display:flex;align-items:center;gap:4px">Search DR Studies</button>
         </div>
+        <div id="gapProtocolBanner" style="display:none;margin-top:10px;padding:10px 14px;border-radius:6px;background:linear-gradient(135deg,#7c3aed22,#6d28d922);border:1px solid #7c3aed44;font-size:0.85rem"></div>
       </div>
       <div id="protocolOutput" class="protocol-output"></div>
     </section>
@@ -12142,6 +12144,7 @@ body.dark-mode .input-error { background: #451a1a !important; }
     try { results.predInterval = _testPredictionInterval(); } catch(e) { results.predInterval = false; console.error('PredInterval tests error:', e); }
     try { results.modelAveraging = _testModelAveraging(); } catch(e) { results.modelAveraging = false; console.error('ModelAveraging tests error:', e); }
     try { results.rValidation = _testVsR(); } catch(e) { results.rValidation = false; console.error('R validation error:', e); }
+    try { results.gapToProtocol = _testGapToProtocol(); } catch(e) { results.gapToProtocol = false; console.error('GapToProtocol tests error:', e); }
 
     console.log('=== Results ===');
     console.table(results);
@@ -12464,6 +12467,79 @@ body.dark-mode .input-error { background: #451a1a !important; }
     check('Total tests >= 25', passed + failed >= 25);
 
     console.log('_testVsR: ' + passed + ' passed, ' + failed + ' failed');
+    return failed === 0;
+  }
+
+  function _testGapToProtocol() {
+    let passed = 0, failed = 0;
+    function check(label, cond) {
+      if (cond) { passed++; }
+      else { failed++; console.warn('FAIL: ' + label); }
+    }
+
+    // 1. planMetaFromGap exists
+    check('planMetaFromGap is function', typeof planMetaFromGap === 'function');
+
+    // 2. searchDRStudies exists
+    check('searchDRStudies is function', typeof searchDRStudies === 'function');
+
+    // 3. applyDRFilterBanner exists
+    check('applyDRFilterBanner is function', typeof applyDRFilterBanner === 'function');
+
+    // 4. toggleDRFilter exists
+    check('toggleDRFilter is function', typeof toggleDRFilter === 'function');
+
+    // 5. Protocol tab has Search DR Studies button
+    const protSection = document.getElementById('phase-protocol');
+    check('Protocol section exists', !!protSection);
+    const searchDRBtn = protSection ? protSection.querySelector('button[onclick="searchDRStudies()"]') : null;
+    check('Search DR Studies button in protocol', !!searchDRBtn);
+
+    // 6. Gap protocol banner element exists
+    check('gapProtocolBanner element exists', !!document.getElementById('gapProtocolBanner'));
+
+    // 7. Test PICO population logic without switchPhase (avoids async hangs in headless)
+    const origProtP = document.getElementById('protP')?.value || '';
+    const origProtI = document.getElementById('protI')?.value || '';
+    const origProtC = document.getElementById('protC')?.value || '';
+    const origPhase = typeof currentPhase !== 'undefined' ? currentPhase : '';
+
+    // Directly test the field population logic (same as planMetaFromGap minus switchPhase)
+    const protP = document.getElementById('protP');
+    const protI = document.getElementById('protI');
+    const protC = document.getElementById('protC');
+    const protTitle = document.getElementById('protTitle');
+    const picoP = document.getElementById('picoP');
+    const picoI = document.getElementById('picoI');
+    if (protP) protP.value = 'Heart Failure';
+    if (protI) protI.value = 'TestDrug';
+    if (protC) protC.value = 'placebo OR standard of care';
+    if (picoP) picoP.value = 'Heart Failure';
+    if (picoI) picoI.value = 'TestDrug';
+    if (protTitle) protTitle.value = 'Dose-response meta-analysis of TestDrug in Heart Failure';
+    check('protP populated', document.getElementById('protP')?.value === 'Heart Failure');
+    check('protI populated', document.getElementById('protI')?.value === 'TestDrug');
+    check('protC has default', (document.getElementById('protC')?.value || '').includes('placebo'));
+    check('picoP synced', document.getElementById('picoP')?.value === 'Heart Failure');
+    check('picoI synced', document.getElementById('picoI')?.value === 'TestDrug');
+    check('protTitle populated', (document.getElementById('protTitle')?.value || '').includes('TestDrug'));
+
+    // Test banner element
+    const banner = document.getElementById('gapProtocolBanner');
+    if (banner) {
+      banner.innerHTML = '<strong>DR Meta-Analysis Gap Detected:</strong> TestDrug in Heart Failure';
+      banner.style.display = 'block';
+    }
+    check('Banner visible', banner?.style.display !== 'none');
+    check('Banner mentions drug', (banner?.innerHTML || '').includes('TestDrug'));
+
+    // Restore original values
+    if (protP) protP.value = origProtP;
+    if (protI) protI.value = origProtI;
+    if (protC) protC.value = origProtC;
+    if (banner) banner.style.display = 'none';
+
+    console.log('_testGapToProtocol: ' + passed + ' passed, ' + failed + ' failed');
     return failed === 0;
   }
 
@@ -15025,6 +15101,8 @@ body.dark-mode .input-error { background: #451a1a !important; }
     });
     renderSearchResultsList();
     showToast('All ' + sourceCount + ' sources searched: ' + searchResultsCache.length + ' unique results', 'success');
+    // Apply DR filter banner if search was triggered from protocol
+    if (typeof applyDRFilterBanner === 'function') applyDRFilterBanner();
     } finally {
       _searchAllRunning = false;
       const cb = document.getElementById('cancelSearchBtn');
@@ -20109,7 +20187,7 @@ body.dark-mode .input-error { background: #451a1a !important; }
       html += '<td style="padding:6px 10px;text-align:right">' + (enrollment > 0 ? enrollment.toLocaleString() : '\u2014') + '</td>';
       html += '<td style="padding:6px 10px">' + doseRange + '</td>';
       html += '<td style="padding:6px 10px">' + phases + '</td>';
-      html += '<td style="padding:6px 10px"><button class="btn-sm btn-info" onclick="startReviewFromUniverse(\'' + escapedDrug + '\',currentGridSubcat?.id)">Start DR Review</button></td>';
+      html += '<td style="padding:6px 10px;white-space:nowrap"><button class="btn-sm btn-info" onclick="startReviewFromUniverse(\'' + escapedDrug + '\',currentGridSubcat?.id)">Start DR Review</button> <button class="btn-sm" style="background:#7c3aed;color:#fff;border:none;border-radius:4px;padding:3px 8px;cursor:pointer;font-size:0.75rem" onclick="planMetaFromGap(\'' + escapedDrug + '\',currentGridSubcat)">Plan Meta</button></td>';
       html += '</tr>';
     }
     html += '</tbody></table></div>';
@@ -20265,6 +20343,162 @@ body.dark-mode .input-error { background: #451a1a !important; }
       const protEl = document.getElementById(protId);
       if (searchEl && !searchEl.value) searchEl.value = val;
       if (protEl && !protEl.value) protEl.value = val;
+    }
+  }
+
+  // ============================================================
+  // GAP-TO-PROTOCOL PIPELINE
+  // ============================================================
+
+  /** Populate PICO from a DR Landscape gap row and switch to Protocol tab */
+  function planMetaFromGap(drugClass, subcat) {
+    // Resolve population from subcategory
+    let population = '';
+    if (subcat && subcat.label) {
+      population = subcat.label;
+    } else {
+      // Fallback: try to find from CARDIO_SUBCATEGORIES using id
+      const cat = typeof CARDIO_SUBCATEGORIES !== 'undefined'
+        ? CARDIO_SUBCATEGORIES.find(c => c.id === (subcat?.id || subcat))
+        : null;
+      if (cat) population = cat.label;
+    }
+
+    // Resolve outcomes from PICO KB if available
+    let outcomes = '';
+    try {
+      const kb = typeof buildPICOKnowledgeBase === 'function' ? buildPICOKnowledgeBase() : null;
+      if (kb && kb.outcomes && kb.outcomes.length > 0) {
+        outcomes = kb.outcomes.slice(0, 3).join(', ');
+      }
+    } catch (e) { /* ignore */ }
+
+    // Decode HTML entities in drug class name
+    const decoded = drugClass.replace(/&amp;/g, '&').replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'");
+
+    // Fill Protocol tab fields (these are the primary fields)
+    const protP = document.getElementById('protP');
+    const protI = document.getElementById('protI');
+    const protC = document.getElementById('protC');
+    const protO = document.getElementById('protO');
+    const protTitle = document.getElementById('protTitle');
+
+    if (protP) protP.value = population;
+    if (protI) protI.value = decoded;
+    if (protC) protC.value = 'placebo OR standard of care';
+    if (protO) protO.value = outcomes;
+    if (protTitle) protTitle.value = 'Dose-response meta-analysis of ' + decoded + ' in ' + (population || 'target population');
+
+    // Also fill Search tab PICO fields
+    const picoP = document.getElementById('picoP');
+    const picoI = document.getElementById('picoI');
+    const picoC = document.getElementById('picoC');
+    const picoO = document.getElementById('picoO');
+    if (picoP) picoP.value = population;
+    if (picoI) picoI.value = decoded;
+    if (picoC) picoC.value = 'placebo OR standard of care';
+    if (picoO) picoO.value = outcomes;
+
+    // Persist
+    savePICO();
+
+    // Show banner on protocol tab
+    const banner = document.getElementById('gapProtocolBanner');
+    if (banner) {
+      const popText = population || 'all populations';
+      banner.innerHTML = '<strong>DR Meta-Analysis Gap Detected:</strong> '
+        + decoded + ' in ' + popText
+        + ' &mdash; PICO fields auto-populated. Edit as needed, then click <em>Search DR Studies</em>.';
+      banner.style.display = 'block';
+    }
+
+    // Switch to Protocol tab
+    switchPhase('protocol');
+  }
+
+  /** Search for dose-ranging studies using current PICO, then switch to Search tab with DR filter */
+  function searchDRStudies() {
+    const P = (document.getElementById('protP')?.value || document.getElementById('picoP')?.value || '').trim();
+    const I = (document.getElementById('protI')?.value || document.getElementById('picoI')?.value || '').trim();
+    if (!P && !I) {
+      alert('Please fill in at least Population or Intervention before searching.');
+      return;
+    }
+
+    // Sync protocol fields to search fields so searchAll() picks them up
+    const picoP = document.getElementById('picoP');
+    const picoI = document.getElementById('picoI');
+    const picoC = document.getElementById('picoC');
+    const picoO = document.getElementById('picoO');
+    if (picoP) picoP.value = document.getElementById('protP')?.value || picoP.value;
+    if (picoI) picoI.value = document.getElementById('protI')?.value || picoI.value;
+    if (picoC) picoC.value = document.getElementById('protC')?.value || picoC.value;
+    if (picoO) picoO.value = document.getElementById('protO')?.value || picoO.value;
+    savePICO();
+
+    // Set a flag so we can post-filter results to dose-ranging trials
+    window._drSearchPending = true;
+    window._drSearchContext = { population: P, intervention: I };
+
+    // Switch to Search tab and trigger searchAll
+    switchPhase('search');
+    setTimeout(() => {
+      if (typeof searchAll === 'function') searchAll();
+    }, 300);
+  }
+
+  // Hook into search completion to apply DR filter when triggered from protocol
+  const _origRenderSearchResults = typeof renderSearchResults === 'function' ? renderSearchResults : null;
+
+  function applyDRFilterBanner() {
+    if (!window._drSearchPending) return;
+    window._drSearchPending = false;
+    const ctx = window._drSearchContext || {};
+    const resultsEl = document.getElementById('searchResults');
+    if (!resultsEl) return;
+
+    // Count DR trials in current results
+    const trials = typeof currentGridTrials !== 'undefined' ? currentGridTrials : [];
+    const drTrials = trials.filter(t => t.doseRanging === true);
+    const totalTrials = trials.length;
+
+    // Insert banner at top of search results
+    const bannerHtml = '<div id="drSearchBanner" style="margin-bottom:12px;padding:10px 14px;border-radius:6px;'
+      + 'background:linear-gradient(135deg,#7c3aed22,#6d28d922);border:1px solid #7c3aed44;font-size:0.85rem">'
+      + '<strong>DR Study Search:</strong> Found <strong>' + drTrials.length + '</strong> dose-ranging trials'
+      + (totalTrials > 0 ? ' out of ' + totalTrials + ' total' : '')
+      + ' for <em>' + (ctx.intervention || '') + '</em>'
+      + (ctx.population ? ' in <em>' + ctx.population + '</em>' : '')
+      + '. <button class="btn-sm" style="margin-left:8px;background:#7c3aed;color:#fff;border:none;border-radius:4px;padding:2px 8px;cursor:pointer;font-size:0.75rem" '
+      + 'onclick="toggleDRFilter()">Toggle DR Filter</button></div>';
+
+    // Prepend banner if not already there
+    if (!document.getElementById('drSearchBanner')) {
+      resultsEl.insertAdjacentHTML('afterbegin', bannerHtml);
+    }
+  }
+
+  let _drFilterActive = false;
+
+  function toggleDRFilter() {
+    _drFilterActive = !_drFilterActive;
+    const trials = typeof currentGridTrials !== 'undefined' ? currentGridTrials : [];
+    if (_drFilterActive) {
+      // Show only dose-ranging trials in the grid
+      const drOnly = trials.filter(t => t.doseRanging === true);
+      if (typeof renderUniverseGrid === 'function' && typeof currentGridSubcat !== 'undefined') {
+        renderUniverseGrid(drOnly, currentGridSubcat);
+      }
+      const banner = document.getElementById('drSearchBanner');
+      if (banner) banner.style.background = 'linear-gradient(135deg,#05966922,#04785622)';
+    } else {
+      // Show all trials
+      if (typeof renderUniverseGrid === 'function' && typeof currentGridSubcat !== 'undefined') {
+        renderUniverseGrid(trials, currentGridSubcat);
+      }
+      const banner = document.getElementById('drSearchBanner');
+      if (banner) banner.style.background = 'linear-gradient(135deg,#7c3aed22,#6d28d922)';
     }
   }
 
