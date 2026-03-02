@@ -467,6 +467,14 @@ button:hover { background: var(--primary-hover); }
   body:not(.light-forced) .abstract-content mark { background: #854d0e; color: #fef3c7; }
   body:not(.light-forced) .autoscreen-bar { background: #334155; }
   body:not(.light-forced) .keyword { background: #1e3a5f; }
+  body:not(.light-forced) .badge-include { background: #032e23; color: #34d399; }
+  body:not(.light-forced) .badge-exclude { background: #451a1a; color: #f87171; }
+  body:not(.light-forced) .badge-maybe { background: #4a2008; color: #fbbf24; }
+  body:not(.light-forced) .badge-duplicate { background: #1e293b; color: #94a3b8; }
+  body:not(.light-forced) .sprint-alert-info { background: #1e3a5f; border-color: #3b82f6; }
+  body:not(.light-forced) .sprint-alert-warning { background: #4a2008; border-color: #f59e0b; }
+  body:not(.light-forced) .sprint-alert-danger { background: #451a1a; border-color: #ef4444; }
+  body:not(.light-forced) .sprint-alert-success { background: #032e23; border-color: #10b981; }
 }
 
 /* --- Dark Mode: manual toggle --- */
@@ -483,6 +491,14 @@ body.dark-mode input, body.dark-mode select, body.dark-mode textarea { backgroun
 body.dark-mode .abstract-content mark { background: #854d0e; color: #fef3c7; }
 body.dark-mode .autoscreen-bar { background: var(--border); }
 body.dark-mode .keyword { background: #1e3a5f; }
+body.dark-mode .badge-include { background: #032e23; color: #34d399; }
+body.dark-mode .badge-exclude { background: #451a1a; color: #f87171; }
+body.dark-mode .badge-maybe { background: #4a2008; color: #fbbf24; }
+body.dark-mode .badge-duplicate { background: #1e293b; color: #94a3b8; }
+body.dark-mode .sprint-alert-info { background: #1e3a5f; border-color: #3b82f6; }
+body.dark-mode .sprint-alert-warning { background: #4a2008; border-color: #f59e0b; }
+body.dark-mode .sprint-alert-danger { background: #451a1a; border-color: #ef4444; }
+body.dark-mode .sprint-alert-success { background: #032e23; border-color: #10b981; }
 body.dark-mode #clinicalDisclaimer { background: #4a2008 !important; border-color: #92400e !important; color: #fbbf24 !important; }
 body.dark-mode #clinicalDisclaimer strong { color: #fbbf24 !important; }
 body.dark-mode #clinicalDisclaimer button { border-color: #fbbf24 !important; color: #fbbf24 !important; }
@@ -837,6 +853,10 @@ body.dark-mode .badge-include { background: #032e23; color: #34d399; }
 body.dark-mode .badge-exclude { background: #451a1a; color: #f87171; }
 body.dark-mode .badge-maybe { background: #4a2008; color: #fbbf24; }
 body.dark-mode .badge-duplicate { background: #1e293b; color: #94a3b8; }
+body.dark-mode input::placeholder, body.dark-mode textarea::placeholder { color: #94a3b8; }
+@media (prefers-color-scheme: dark) {
+  body:not(.light-forced) input::placeholder, body:not(.light-forced) textarea::placeholder { color: #94a3b8; }
+}
 .validation-msg { font-size: 0.72rem; color: var(--danger); padding: 2px 4px; }
 
 /* --- Loading spinner --- */
@@ -1188,7 +1208,7 @@ body.dark-mode .badge-duplicate { background: #1e293b; color: #94a3b8; }
         <div id="kitabSearchRow" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px;padding-top:8px;border-top:1px solid var(--border)">
           <div style="position:relative;flex:1;min-width:200px">
             <input type="text" id="fihrisSearch" placeholder="Search the evidence... (e.g., SGLT2 mortality, empagliflozin)" style="width:100%;padding:6px 32px 6px 10px;border:1px solid var(--border);border-radius:6px;font-size:0.82rem;background:var(--surface);color:var(--text)" oninput="debounceFihrisSearch(this.value)">
-            <span id="fihrisSearchClear" onclick="clearFihrisSearch()" style="position:absolute;right:8px;top:50%;transform:translateY(-50%);cursor:pointer;font-size:1rem;color:var(--text-muted);display:none" title="Clear search">&times;</span>
+            <span id="fihrisSearchClear" onclick="clearFihrisSearch()" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();clearFihrisSearch()}" tabindex="0" role="button" aria-label="Clear search" style="position:absolute;right:8px;top:50%;transform:translateY(-50%);cursor:pointer;font-size:1rem;color:var(--text-muted);display:none" title="Clear search">&times;</span>
           </div>
           <span id="fihrisResultBadge" style="font-size:0.78rem;color:var(--text-muted);white-space:nowrap"></span>
           <label style="font-size:0.75rem;color:var(--text-muted);display:flex;align-items:center;gap:3px;margin-left:8px">
@@ -1567,7 +1587,7 @@ body.dark-mode .badge-duplicate { background: #1e293b; color: #94a3b8; }
         <div id="tawakkulNoData" class="placeholder" style="display:none">Run an analysis first (Analyze tab) to see trust decomposition.</div>
         <div id="tawakkulContent" style="display:none">
           <div style="display:flex;gap:24px;flex-wrap:wrap;align-items:flex-start">
-            <canvas id="tawakkulRadar" width="420" height="420" style="max-width:100%"></canvas>
+            <canvas id="tawakkulRadar" width="420" height="420" style="max-width:100%" role="img" aria-label="Radar chart showing 8 trustworthiness dimensions of the evidence base">Trust radar chart</canvas>
             <div id="tawakkulDetails" style="flex:1;min-width:280px"></div>
           </div>
         </div>
@@ -1579,7 +1599,7 @@ body.dark-mode .badge-duplicate { background: #1e293b; color: #94a3b8; }
         <p class="text-muted" style="margin-bottom:10px">Balance-scale visualization weighing benefits against harms for the pooled intervention.</p>
         <div id="mizanNoData" class="placeholder" style="display:none">Extract study data with both efficacy and safety outcomes to see the balance.</div>
         <div id="mizanContent" style="display:none">
-          <canvas id="mizanCanvas" width="600" height="400" style="max-width:100%"></canvas>
+          <canvas id="mizanCanvas" width="600" height="400" style="max-width:100%" role="img" aria-label="Balance scale weighing benefits against harms for the pooled intervention">Harm-benefit balance chart</canvas>
           <div id="mizanSummary" style="margin-top:12px"></div>
         </div>
       </div>
@@ -1592,7 +1612,7 @@ body.dark-mode .badge-duplicate { background: #1e293b; color: #94a3b8; }
         <div id="shuraContent" style="display:none">
           <button onclick="runShuraMultiverse()" style="margin-bottom:12px">Run Multiverse Analysis</button>
           <div id="shuraProgress" style="display:none;margin-bottom:8px;font-size:0.82rem;color:var(--text-muted)"></div>
-          <canvas id="shuraCurve" width="800" height="500" style="max-width:100%"></canvas>
+          <canvas id="shuraCurve" width="800" height="500" style="max-width:100%" role="img" aria-label="Specification curve showing effect sizes across all analytic permutations">Multiverse specification curve</canvas>
           <div id="shuraTable" style="margin-top:12px"></div>
         </div>
       </div>
@@ -1643,7 +1663,7 @@ body.dark-mode .badge-duplicate { background: #1e293b; color: #94a3b8; }
           <div style="display:flex;gap:24px;flex-wrap:wrap">
             <div style="flex:1;min-width:300px">
               <h4 style="font-size:0.9rem;margin-bottom:8px">Quantile Dot Plot</h4>
-              <canvas id="ihsanDotPlot" width="500" height="300" style="max-width:100%"></canvas>
+              <canvas id="ihsanDotPlot" width="500" height="300" style="max-width:100%" role="img" aria-label="Quantile dot plot showing distribution of treatment effect">Quantile dot plot</canvas>
             </div>
             <div style="flex:1;min-width:300px">
               <h4 style="font-size:0.9rem;margin-bottom:8px">Icon Array (per 100 patients)</h4>
@@ -1652,7 +1672,7 @@ body.dark-mode .badge-duplicate { background: #1e293b; color: #94a3b8; }
           </div>
           <div id="ihsanTimeline" style="margin-top:20px">
             <h4 style="font-size:0.9rem;margin-bottom:8px">Evidence Accumulation Timeline</h4>
-            <canvas id="ihsanTimelineCanvas" width="700" height="250" style="max-width:100%"></canvas>
+            <canvas id="ihsanTimelineCanvas" width="700" height="250" style="max-width:100%" role="img" aria-label="Timeline showing cumulative evidence accumulation over time">Evidence accumulation timeline</canvas>
           </div>
         </div>
       </div>
@@ -1687,7 +1707,7 @@ body.dark-mode .badge-duplicate { background: #1e293b; color: #94a3b8; }
         <div id="dhulmNoData" class="placeholder" style="display:none">Load trial universe or extract study data to assess equity.</div>
         <div id="dhulmContent" style="display:none">
           <button onclick="runDhulmEquity()" style="margin-bottom:12px">Assess Representation Equity</button>
-          <canvas id="dhulmChart" width="600" height="400" style="max-width:100%"></canvas>
+          <canvas id="dhulmChart" width="600" height="400" style="max-width:100%" role="img" aria-label="Chart assessing population representation equity across studies">Representation equity chart</canvas>
           <div id="dhulmReport" style="margin-top:12px"></div>
         </div>
       </div>
