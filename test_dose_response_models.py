@@ -1055,7 +1055,8 @@ class TestRValidation:
         var Slist = [], yAll = [], XAll = [], XQuad = [], studyNs = [];
         for (var si = 0; si < alcData.length; si++) {
             var s = alcData[si];
-            var Smat = greenlandLongnecker(s.cases, s.n, 0, s.type);
+            var vArr = s.se ? s.se.slice(1).map(function(x) { return x * x; }) : null;
+            var Smat = greenlandLongnecker(s.cases, s.n, 0, s.type, vArr);
             if (!Smat) return null;
             Slist.push(Smat);
             studyNs.push(s.doses.length - 1);
@@ -1068,11 +1069,12 @@ class TestRValidation:
     """
 
     def test_gl_covariance_dimensions(self, driver, ref):
-        """GL covariance matrices should have correct dimensions matching R."""
+        """GL covariance matrices (Hamling) should have correct dimensions matching R."""
         result = driver.execute_script("""
             var alcData = buildAlcoholCVDData();
             return alcData.map(function(s) {
-                var S = greenlandLongnecker(s.cases, s.n, 0, s.type);
+                var vArr = s.se ? s.se.slice(1).map(function(x) { return x * x; }) : null;
+                var S = greenlandLongnecker(s.cases, s.n, 0, s.type, vArr);
                 return S ? S.length : null;
             });
         """)
@@ -1084,13 +1086,14 @@ class TestRValidation:
                 f"Study {si} dim: JS={result[si]}, R={len(r_Slist[si])}"
 
     def test_gl_covariance_positive_definite(self, driver):
-        """All GL covariance matrices should be symmetric positive definite."""
+        """All GL covariance matrices (Hamling) should be symmetric positive definite."""
         result = driver.execute_script("""
             var alcData = buildAlcoholCVDData();
             var checks = [];
             for (var si = 0; si < alcData.length; si++) {
                 var s = alcData[si];
-                var S = greenlandLongnecker(s.cases, s.n, 0, s.type);
+                var vArr = s.se ? s.se.slice(1).map(function(x) { return x * x; }) : null;
+                var S = greenlandLongnecker(s.cases, s.n, 0, s.type, vArr);
                 if (!S) { checks.push({id: s.id, ok: false, reason: 'null'}); continue; }
                 var allPosDiag = true, symmetric = true;
                 for (var i = 0; i < S.length; i++) {
@@ -1107,12 +1110,13 @@ class TestRValidation:
         for c in result:
             assert c['ok'], f"Study {c['id']}: posDiag={c.get('allPosDiag')}, sym={c.get('symmetric')}"
 
-    def test_gl_covariance_same_sign_as_r(self, driver, ref):
-        """GL off-diagonal elements should be positive (shared reference), matching R sign."""
+    def test_gl_covariance_matches_r(self, driver, ref):
+        """GL Hamling covariance should match R Slist within tolerance."""
         result = driver.execute_script("""
             var alcData = buildAlcoholCVDData();
             return alcData.map(function(s) {
-                return greenlandLongnecker(s.cases, s.n, 0, s.type);
+                var vArr = s.se ? s.se.slice(1).map(function(x) { return x * x; }) : null;
+                return greenlandLongnecker(s.cases, s.n, 0, s.type, vArr);
             });
         """)
         assert result is not None
@@ -1122,13 +1126,11 @@ class TestRValidation:
             r_S = r_Slist[si]
             for i in range(len(r_S)):
                 for j in range(len(r_S[i])):
-                    # Both should have same sign (positive off-diag for shared-reference design)
-                    if r_S[i][j] > 0:
-                        assert js_S[i][j] > 0, \
-                            f"S[{si}][{i}][{j}]: JS={js_S[i][j]} should be positive like R={r_S[i][j]}"
+                    assert abs(js_S[i][j] - r_S[i][j]) < 5e-3, \
+                        f"S[{si}][{i}][{j}]: JS={js_S[i][j]:.6f}, R={r_S[i][j]:.6f}"
 
-    def test_fixed_effects_coefficient_direction(self, driver, ref):
-        """Fixed-effects coefficient should be negative and close to R (within 5e-4)."""
+    def test_fixed_effects_coefficient_matches_r(self, driver, ref):
+        """Fixed-effects coefficient should match R within 5e-4 (Hamling GL)."""
         result = driver.execute_script(self.ALC_SETUP_JS + """
             var fixed = glsFit(XAll, yAll, Slist, studyNs);
             if (!fixed) return null;
@@ -1136,13 +1138,12 @@ class TestRValidation:
         """)
         assert result is not None
         r = ref['alcohol_cvd']['linear_fixed']
-        # Fixed effects don't depend on tau2 — should be close
         assert result['coef'] < 0, "Fixed coef should be negative"
         assert abs(result['coef'] - r['coefficients']) < 5e-4, \
             f"Fixed coef: JS={result['coef']:.8f}, R={r['coefficients']:.8f}"
 
-    def test_fixed_effects_se_order(self, driver, ref):
-        """Fixed-effects SE should be positive and within 2x of R."""
+    def test_fixed_effects_se_matches_r(self, driver, ref):
+        """Fixed-effects SE should match R within 5e-4 (Hamling GL)."""
         result = driver.execute_script(self.ALC_SETUP_JS + """
             var fixed = glsFit(XAll, yAll, Slist, studyNs);
             if (!fixed) return null;
@@ -1151,26 +1152,32 @@ class TestRValidation:
         assert result is not None
         r_se = ref['alcohol_cvd']['linear_fixed']['se']
         assert result > 0, "SE must be positive"
-        ratio = result / r_se
-        assert 0.5 < ratio < 2.0, f"SE ratio: JS={result:.6f}/R={r_se:.6f} = {ratio:.2f}"
+        assert abs(result - r_se) < 5e-4, \
+            f"Fixed SE: JS={result:.8f}, R={r_se:.8f}"
 
-    def test_reml_coefficient_negative(self, driver):
-        """REML coefficient should be negative (protective effect of alcohol on CVD)."""
+    def test_reml_coefficient_matches_r(self, driver, ref):
+        """REML coefficient should match R within 5e-4."""
         result = driver.execute_script(self.ALC_SETUP_JS + """
             var reml = estimateDRREML(XAll, yAll, Slist, studyNs);
             return reml ? reml.coefficients[0] : null;
         """)
         assert result is not None
+        r_coef = ref['alcohol_cvd']['linear_reml']['coefficients']
         assert result < 0, f"REML coef should be negative, got {result}"
+        assert abs(result - r_coef) < 5e-4, \
+            f"REML coef: JS={result:.8f}, R={r_coef:.8f}"
 
-    def test_reml_tau2_nonnegative(self, driver):
-        """REML tau2 should be non-negative."""
+    def test_reml_tau2_matches_r(self, driver, ref):
+        """REML tau2 should match R within 5e-3."""
         result = driver.execute_script(self.ALC_SETUP_JS + """
             var reml = estimateDRREML(XAll, yAll, Slist, studyNs);
             return reml ? reml.tau2 : null;
         """)
         assert result is not None
+        r_tau2 = ref['alcohol_cvd']['linear_reml']['tau2']
         assert result >= 0, f"REML tau2 must be >= 0, got {result}"
+        assert abs(result - r_tau2) < 5e-3, \
+            f"REML tau2: JS={result:.8f}, R={r_tau2:.8f}"
 
     def test_reml_se_larger_than_fixed(self, driver):
         """REML SE should be >= fixed SE (heterogeneity adds uncertainty)."""
@@ -1196,8 +1203,8 @@ class TestRValidation:
         assert result['reml_tau2'] >= result['ml_tau2'] * 0.99, \
             f"REML tau2={result['reml_tau2']:.6f} should be >= ML tau2={result['ml_tau2']:.6f}"
 
-    def test_reml_predictions_same_sign_as_r(self, driver, ref):
-        """REML predictions should have same sign as R at all dose points."""
+    def test_reml_predictions_match_r(self, driver, ref):
+        """REML predictions should match R within 5e-3 at all dose points."""
         result = driver.execute_script(self.ALC_SETUP_JS + """
             var reml = estimateDRREML(XAll, yAll, Slist, studyNs);
             if (!reml) return null;
@@ -1211,11 +1218,10 @@ class TestRValidation:
         for rp in r_preds:
             if rp['dose'] == 0:
                 continue
-            js_match = next(r for r in result if r['dose'] == rp['dose'])
-            # Same sign check
-            if rp['pred'] < 0:
-                assert js_match['pred'] < 0, \
-                    f"dose={rp['dose']}: JS={js_match['pred']}, R={rp['pred']} — sign mismatch"
+            js_match = next((r for r in result if r['dose'] == rp['dose']), None)
+            if js_match:
+                assert abs(js_match['pred'] - rp['pred']) < 5e-3, \
+                    f"dose={rp['dose']}: JS={js_match['pred']:.6f}, R={rp['pred']:.6f}"
 
     def test_aic_values_finite_and_distinct(self, driver):
         """Linear and quadratic REML should produce finite, distinct AIC values."""
@@ -1243,29 +1249,29 @@ class TestRValidation:
         assert result[1] > 0, f"Quad coef[1] should be positive, got {result[1]}"
         assert r_coef[0] < 0 and r_coef[1] > 0, "R reference confirms U-shape"
 
-    def test_regression_snapshot_fixed_coef(self, driver):
-        """Regression: fixed-effects coefficient should stay at current JS value."""
+    def test_regression_snapshot_fixed_coef(self, driver, ref):
+        """Regression: fixed-effects coefficient should match R reference."""
         result = driver.execute_script(self.ALC_SETUP_JS + """
             var fixed = glsFit(XAll, yAll, Slist, studyNs);
             return fixed ? fixed.coefficients[0] : null;
         """)
         assert result is not None
-        # Snapshot from current JS implementation (2026-03-03)
-        snapshot = -0.004510936
-        assert abs(result - snapshot) < 1e-6, \
-            f"Regression: JS fixed coef changed from {snapshot} to {result}"
+        # With Hamling GL, should now match R closely
+        r_coef = ref['alcohol_cvd']['linear_fixed']['coefficients']
+        assert abs(result - r_coef) < 5e-4, \
+            f"Regression: JS fixed coef={result:.8f}, R={r_coef:.8f}"
 
-    def test_regression_snapshot_reml_tau2(self, driver):
-        """Regression: REML tau2 should stay at current JS value."""
+    def test_regression_snapshot_reml_tau2(self, driver, ref):
+        """Regression: REML tau2 should match R reference (near zero with Hamling)."""
         result = driver.execute_script(self.ALC_SETUP_JS + """
             var reml = estimateDRREML(XAll, yAll, Slist, studyNs);
             return reml ? reml.tau2 : null;
         """)
         assert result is not None
-        # Snapshot from current JS implementation (2026-03-03)
-        snapshot = 0.146507351
-        assert abs(result - snapshot) < 1e-4, \
-            f"Regression: JS REML tau2 changed from {snapshot} to {result}"
+        # With Hamling GL, tau2 should be ~0.0001 (not 0.147)
+        r_tau2 = ref['alcohol_cvd']['linear_reml']['tau2']
+        assert abs(result - r_tau2) < 5e-3, \
+            f"Regression: JS REML tau2={result:.8f}, R={r_tau2:.8f}"
 
 
 class TestCoverageGaps:
