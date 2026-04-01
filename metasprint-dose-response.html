@@ -22331,7 +22331,7 @@ body.dark-mode input::placeholder, body.dark-mode textarea::placeholder { color:
     if (banner) {
       const popText = population || 'all populations';
       banner.innerHTML = '<strong>DR Meta-Analysis Gap Detected:</strong> '
-        + decoded + ' in ' + popText
+        + escapeHtml(decoded) + ' in ' + escapeHtml(popText)
         + ' &mdash; PICO fields auto-populated. Edit as needed, then click <em>Search DR Studies</em>.';
       banner.style.display = 'block';
     }
