@@ -46,16 +46,16 @@ Open `metasprint-dose-response.html` in any modern browser (Chrome, Firefox, Edg
 - Chrome browser
 - `pip install selenium pytest`
 
-### Selenium Integration Tests (81 tests)
+### Selenium Integration Tests (106 tests)
 ```bash
 cd metasprint-dose-response
 python -m pytest test_dose_response_models.py -v
 ```
 
-### Inline Self-Tests (446 tests)
+### Inline Self-Tests (19 suites)
 Open the browser console and run:
 ```javascript
-_runAllDRTests()  // Returns true if all 14 suites pass
+_runAllDRTests()  // Returns true if all 19 suites pass
 ```
 
 ### R Cross-Validation
@@ -77,7 +77,7 @@ The JS implementations are cross-validated against R `dosresmeta2` v2.2.0 with t
 
 ## Architecture
 
-Single HTML file (~25,800 lines) with zero external dependencies:
+Single HTML file (~52,000 lines) with zero external dependencies:
 - Vanilla JS (no frameworks)
 - CSS custom properties for theming (light/dark mode)
 - localStorage for persistence (with in-memory fallback)
