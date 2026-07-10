@@ -1278,22 +1278,52 @@ class TestCoverageGaps:
     """Tests for previously untested features."""
 
     def test_csv_import_round_trip(self, driver):
-        """CSV import should parse dose-response data correctly."""
+        """CSV parsing primitives should round-trip dose-response rows.
+
+        Exercises the real CSV import building blocks the app uses
+        (parseCSVLine + getCSVVal + parseFloatSafe). No typeof guard: if any
+        of these functions is renamed, this test fails loudly instead of
+        silently skipping.
+        """
         result = driver.execute_script("""
-            if (typeof parseCSVData !== 'function') return 'skip';
-            var csv = 'study,dose,logrr,se,cases,n,type\\n';
-            csv += 'TestStudy,0,0,0,50,200,ci\\n';
-            csv += 'TestStudy,10,-0.2,0.15,40,180,ci\\n';
-            csv += 'TestStudy,20,-0.35,0.18,30,170,ci\\n';
-            var parsed = parseCSVData(csv);
-            if (!parsed) return null;
-            return {rows: parsed.length, firstStudy: parsed[0].study || parsed[0].id,
-                    firstDose: parsed[0].dose};
+            var rows = [
+                'study,dose,effect,se',
+                'TestStudy,0,0,0.10',
+                'TestStudy,10,-0.20,0.15',
+                '"Study, Jr",20,-0.35,0.18'
+            ];
+            var header = parseCSVLine(rows[0], ',');
+            var doseIdx = header.indexOf('dose');
+            var effIdx = header.indexOf('effect');
+            var parsed = [];
+            for (var i = 1; i < rows.length; i++) {
+                var vals = parseCSVLine(rows[i], ',');
+                parsed.push({
+                    study: getCSVVal(vals, 0, ''),
+                    dose: parseFloatSafe(getCSVVal(vals, doseIdx, '')),
+                    effect: parseFloatSafe(getCSVVal(vals, effIdx, ''))
+                });
+            }
+            return {
+                nCols: header.length,
+                rows: parsed.length,
+                firstStudy: parsed[0].study,
+                firstDose: parsed[0].dose,
+                firstEffect: parsed[0].effect,
+                quotedStudy: parsed[2].study,
+                secondDose: parsed[1].dose
+            };
         """)
-        if result == 'skip':
-            pytest.skip("parseCSVData not available")
         assert result is not None
+        assert result['nCols'] == 4
         assert result['rows'] == 3
+        assert result['firstStudy'] == 'TestStudy'
+        # numeric 0 must survive parsing (not dropped by a `|| null` fallback)
+        assert result['firstDose'] == 0
+        assert result['firstEffect'] == 0
+        # quoted comma inside a field must not split the row
+        assert result['quotedStudy'] == 'Study, Jr'
+        assert result['secondDose'] == 10
 
     def test_dark_mode_toggle_persistence(self, driver):
         """Dark mode toggle should persist via localStorage."""
@@ -1333,24 +1363,31 @@ class TestCoverageGaps:
         assert width > 1.0, f"k=2 PI should be very wide, got width={width}"
 
     def test_dose_ranging_detection_basic(self, driver):
-        """Dose-ranging detection should flag trials with 3+ dose levels."""
+        """Dose-ranging detection should flag trials with 3+ dose levels.
+
+        Calls the real detectDoseRanging(trial) function, which parses dose
+        text from each arm's label/name (not a `dose` field). No typeof guard:
+        a rename fails loudly instead of silently skipping.
+        """
         result = driver.execute_script("""
-            if (typeof isDoseRangingTrial !== 'function') return 'skip';
-            // Trial with 4 arms at different doses = dose-ranging
+            // 4 arms, 3 distinct active doses = dose-ranging
             var trial1 = {arms: [
-                {dose: '0 mg', n: 50}, {dose: '10 mg', n: 50},
-                {dose: '20 mg', n: 50}, {dose: '40 mg', n: 50}
-            ]};
-            // Trial with 2 arms = not dose-ranging
+                {label: 'Drug X 10 mg'}, {label: 'Drug X 20 mg'},
+                {label: 'Drug X 40 mg'}, {label: 'Placebo'}
+            ], interventions: []};
+            // Single active dose vs placebo = not dose-ranging
             var trial2 = {arms: [
-                {dose: '0 mg', n: 50}, {dose: '100 mg', n: 50}
-            ]};
-            return {fourArm: isDoseRangingTrial(trial1), twoArm: isDoseRangingTrial(trial2)};
+                {label: 'Drug X 100 mg'}, {label: 'Placebo'}
+            ], interventions: []};
+            return {
+                fourArm: detectDoseRanging(trial1),
+                fourArmLevels: trial1.doseLevels.length,
+                twoArm: detectDoseRanging(trial2)
+            };
         """)
-        if result == 'skip':
-            pytest.skip("isDoseRangingTrial not available")
         assert result is not None
         assert result['fourArm'] is True
+        assert result['fourArmLevels'] == 3
         assert result['twoArm'] is False
 
     def test_localstorage_fallback(self, driver):

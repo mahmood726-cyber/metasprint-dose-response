@@ -45675,7 +45675,7 @@ body.dark-mode input::placeholder, body.dark-mode textarea::placeholder { color:
 
   const TRUTHCERT_BRIDGE_STORAGE_KEY = 'metasprint_truthcert_bridge_payload_v1';
 
-  const DEFAULT_TRUTHCERT_URL = 'file:///C:/Users/user/Downloads/metasprint-dose-response/truthcert1_work/TruthCert-PairwisePro-v1.0.html#metasprint-bridge';
+  const DEFAULT_TRUTHCERT_URL = '';
 
 
 
@@ -46040,6 +46040,14 @@ body.dark-mode input::placeholder, body.dark-mode textarea::placeholder { color:
 
 
       const truthCertUrl = safeGetStorage('msa-dr-truthcert-url', DEFAULT_TRUTHCERT_URL) || DEFAULT_TRUTHCERT_URL;
+
+      if (!truthCertUrl) {
+
+        showToast('Configure a TruthCert URL first to open the bridge (payload saved locally).', 'warning', 6000);
+
+        return;
+
+      }
 
       // S6-1: Validate URL scheme to prevent javascript: injection via localStorage
 
